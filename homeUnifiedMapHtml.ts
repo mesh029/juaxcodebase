@@ -3,13 +3,15 @@
  * Switching tabs only calls `juaApplyHomeMode` via injectJavaScript — no full reload, no black flash.
  */
 
+import { MAP_INTERACTION_HTML, MAP_INTERACTION_JS, MAP_INTERACTION_STYLES } from './mapInteractionScript';
+
 export type HomeUnifiedCoords = { latitude: number; longitude: number };
 
 export type HomeUnifiedPin = {
   id: string;
   title: string;
   subtitle: string;
-  kind: 'station' | 'bnb' | 'house' | 'ride';
+  kind: 'station' | 'bnb' | 'house' | 'ride' | 'destination';
   coords: HomeUnifiedCoords;
 };
 
@@ -17,6 +19,8 @@ export type HomeUnifiedBanks = {
   laundry: HomeUnifiedPin[];
   bnbs: HomeUnifiedPin[];
   houses: HomeUnifiedPin[];
+  rides: HomeUnifiedPin[];
+  destinations: HomeUnifiedPin[];
 };
 
 function slicePins(pts: HomeUnifiedPin[]) {
@@ -43,6 +47,8 @@ export function buildUnifiedHomeServicesMapHtml(
     laundry: slicePins(banks.laundry),
     bnbs: slicePins(banks.bnbs),
     houses: slicePins(banks.houses),
+    rides: slicePins(banks.rides),
+    destinations: slicePins(banks.destinations),
   };
   const banksJson = JSON.stringify(BANKS);
   const defaultPad = { top: 56, bottom: 112, left: 16, right: 16 };
@@ -114,16 +120,20 @@ export function buildUnifiedHomeServicesMapHtml(
         70% { transform: scale(1.45); opacity: 0; }
         100% { opacity: 0; }
       }
+      ${MAP_INTERACTION_STYLES}
     </style>
   </head>
   <body>
     <div id="map"></div>
+    ${MAP_INTERACTION_HTML}
     <script src="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.js"></script>
+    <script>${MAP_INTERACTION_JS}</script>
     <script>
       window.onerror = function () { return true; };
       const BANKS = ${banksJson};
       const DATA = { current: ${currentJson}, viewportPad: ${padJson} };
       let homeMode = 'laundry';
+      let ridesMapFocus = 'pickup';
       let activePoints = (BANKS.laundry || []).slice();
       let SELECTED_HIGHLIGHT = null;
       let mapReady = false;
@@ -190,7 +200,7 @@ export function buildUnifiedHomeServicesMapHtml(
         map.fitBounds(b, { padding: pad, maxZoom: 14.2, duration: 700, essential: true });
       }
       function syncPickHighlight() {
-        var show = homeMode === 'laundry' && SELECTED_HIGHLIGHT;
+        var show = !!SELECTED_HIGHLIGHT;
         if (map.getLayer('pick-highlight-ring')) {
           try { map.removeLayer('pick-highlight-ring'); } catch (_) {}
         }
@@ -222,16 +232,39 @@ export function buildUnifiedHomeServicesMapHtml(
           },
         });
       }
+      function ridesActivePoints() {
+        return ridesMapFocus === 'destination' ? (BANKS.destinations || []) : (BANKS.rides || []);
+      }
       function internalApplyMode(mode) {
-        homeMode = mode === 'houses' ? 'houses' : mode === 'bnbs' ? 'bnbs' : 'laundry';
-        activePoints = homeMode === 'laundry' ? BANKS.laundry : homeMode === 'bnbs' ? BANKS.bnbs : BANKS.houses;
+        homeMode =
+          mode === 'houses' ? 'houses' : mode === 'bnbs' ? 'bnbs' : mode === 'rides' ? 'rides' : 'laundry';
+        activePoints =
+          homeMode === 'laundry'
+            ? BANKS.laundry
+            : homeMode === 'bnbs'
+              ? BANKS.bnbs
+              : homeMode === 'houses'
+                ? BANKS.houses
+                : ridesActivePoints();
         var fc = { type: 'FeatureCollection', features: featuresFromPoints(activePoints) };
         if (map.getSource('pins')) map.getSource('pins').setData(fc);
         syncPickHighlight();
         fitProximityNice();
       }
+      window.juaSetRidesMapFocus = function (focus) {
+        ridesMapFocus = focus === 'destination' ? 'destination' : 'pickup';
+        try {
+          if (mapReady && homeMode === 'rides') {
+            activePoints = ridesActivePoints();
+            var fc = { type: 'FeatureCollection', features: featuresFromPoints(activePoints) };
+            if (map.getSource('pins')) map.getSource('pins').setData(fc);
+            fitProximityNice();
+          }
+        } catch (_) {}
+      };
       window.juaApplyHomeMode = function (mode) {
-        pendingMode = mode === 'houses' ? 'houses' : mode === 'bnbs' ? 'bnbs' : 'laundry';
+        pendingMode =
+          mode === 'houses' ? 'houses' : mode === 'bnbs' ? 'bnbs' : mode === 'rides' ? 'rides' : 'laundry';
         try {
           if (mapReady) internalApplyMode(pendingMode);
         } catch (_) {}
@@ -254,12 +287,13 @@ export function buildUnifiedHomeServicesMapHtml(
           type: 'circle',
           source: 'pins',
           paint: {
-            'circle-radius': ['match', ['get', 'kind'], 'station', 11, 'bnb', 10, 'house', 10, 'ride', 9, 9],
+            'circle-radius': ['match', ['get', 'kind'], 'station', 11, 'bnb', 10, 'house', 10, 'destination', 10, 'ride', 9, 9],
             'circle-color': [
               'match', ['get', 'kind'],
               'station', '#F59E0B',
               'bnb', '#F472B6',
               'house', '#A78BFA',
+              'destination', '#C9A227',
               'ride', '#38BDF8',
               '#38BDF8',
             ],
@@ -290,6 +324,21 @@ export function buildUnifiedHomeServicesMapHtml(
             note.textContent =
               'Book valet in the sheet, then drop your bag here when ready.';
             wrap.appendChild(note);
+            var pickLaundry = document.createElement('span');
+            pickLaundry.className = 'jua-pop-link';
+            pickLaundry.style.marginTop = '8px';
+            pickLaundry.style.display = 'inline-block';
+            pickLaundry.textContent = 'Use as pickup station';
+            pickLaundry.onclick = function () {
+              try {
+                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                  window.ReactNativeWebView.postMessage(
+                    JSON.stringify({ type: 'laundryStationPick', id: String(props.id) }),
+                  );
+                }
+              } catch (_) {}
+            };
+            wrap.appendChild(pickLaundry);
             var valetL = document.createElement('span');
             valetL.className = 'jua-pop-link';
             valetL.style.marginTop = '6px';
@@ -305,6 +354,40 @@ export function buildUnifiedHomeServicesMapHtml(
               } catch (_) {}
             };
             wrap.appendChild(valetL);
+          }
+          if (homeMode === 'rides' && String(props.kind) === 'ride' && props.id) {
+            var ridePick = document.createElement('span');
+            ridePick.className = 'jua-pop-link';
+            ridePick.style.marginTop = '8px';
+            ridePick.style.display = 'inline-block';
+            ridePick.textContent = 'Use as pickup hub';
+            ridePick.onclick = function () {
+              try {
+                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                  window.ReactNativeWebView.postMessage(
+                    JSON.stringify({ type: 'ridePickupHub', id: String(props.id) }),
+                  );
+                }
+              } catch (_) {}
+            };
+            wrap.appendChild(ridePick);
+          }
+          if (homeMode === 'rides' && String(props.kind) === 'destination' && props.id) {
+            var rideDest = document.createElement('span');
+            rideDest.className = 'jua-pop-link';
+            rideDest.style.marginTop = '8px';
+            rideDest.style.display = 'inline-block';
+            rideDest.textContent = 'Use as destination';
+            rideDest.onclick = function () {
+              try {
+                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+                  window.ReactNativeWebView.postMessage(
+                    JSON.stringify({ type: 'rideDestination', id: String(props.id) }),
+                  );
+                }
+              } catch (_) {}
+            };
+            wrap.appendChild(rideDest);
           }
           if (
             (homeMode === 'bnbs' && String(props.kind) === 'bnb') ||
@@ -432,6 +515,9 @@ export function buildUnifiedHomeServicesMapHtml(
         map.on('mouseleave', 'pins-circle', function () {
           map.getCanvas().style.cursor = '';
         });
+        if (window.juaInstallMapInteraction) {
+          window.juaInstallMapInteraction(map, DATA.current);
+        }
       });
     </script>
   </body>

@@ -234,7 +234,7 @@ In the app: Splash → **Experience Convenience** → **Sign Up** → Home tab l
 3. **Home** → switch VALET / BNBS / RENTALS / RIDES → configure options → **Confirm**
 4. **Trips** tab shows the booking summary (in-memory only; lost on restart)
 
-For production gaps and env var details, see **[IMPLEMENTATION.md](./IMPLEMENTATION.md)**.
+For production gaps and env var details, see **[IMPLEMENTATION.md](./IMPLEMENTATION.md)**. For MVP UI flows and screen inventory, see **[UI_SPECS.md](./UI_SPECS.md)**.
 
 ---
 
@@ -252,6 +252,8 @@ For production gaps and env var details, see **[IMPLEMENTATION.md](./IMPLEMENTAT
 | Store deployment | Not configured (no `eas.json`) |
 
 For environment variables, production roadmap, and a line-by-line gap analysis, see **[IMPLEMENTATION.md](./IMPLEMENTATION.md)**.
+
+For MVP screen flows, UI principles, and design specs (laundry, saka keja, rides), see **[UI_SPECS.md](./UI_SPECS.md)**.
 
 ---
 
