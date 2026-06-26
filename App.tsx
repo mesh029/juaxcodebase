@@ -1,4 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
+import * as NavigationBar from 'expo-navigation-bar';
 import { Fragment, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import {
@@ -30,12 +31,13 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
-import { buildUnifiedHomeServicesMapHtml, type HomeUnifiedPin } from './homeUnifiedMapHtml';
+import { buildUnifiedHomeServicesMapHtml, type HomeUnifiedBanks, type HomeUnifiedPin } from './homeUnifiedMapHtml';
 import { AuthScreen } from './AuthScreen';
 import { BRAND } from './theme/brand';
 import { ERServiceSegment, type ServiceSegmentItem } from './components/easyride/ERServiceSegment';
 import { ERTabBar } from './components/easyride/ERTabBar';
 import { ERSearchField } from './components/easyride/ERSearchField';
+import { IntroHeroCarousel, type IntroHeroSlide } from './components/IntroHeroCarousel';
 import { SheetStickyFooter } from './components/make/SheetStickyFooter';
 import {
   MakeDivider,
@@ -609,6 +611,15 @@ const buildInteractivePointsMapHtml = (
 };
 
 /** WebView preview: live GPS on map + route progress; step text is context only (Navigation SDK for production). */
+type GuidanceUiTheme = {
+  canvas: string;
+  surface: string;
+  text: string;
+  textMuted: string;
+  gold: string;
+  isDark: boolean;
+};
+
 const buildGuidanceMapHtml = (
   token: string,
   styleId: string,
@@ -616,6 +627,7 @@ const buildGuidanceMapHtml = (
   destination: Coordinates,
   title: string,
   subtitle: string,
+  ui: GuidanceUiTheme,
 ) => {
   const nav = JSON.stringify({
     token,
@@ -624,6 +636,7 @@ const buildGuidanceMapHtml = (
     destination,
     title,
     subtitle,
+    ui,
   });
   return `<!DOCTYPE html>
 <html>
@@ -631,37 +644,42 @@ const buildGuidanceMapHtml = (
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes"/>
     <link href="https://api.mapbox.com/mapbox-gl-js/v3.3.0/mapbox-gl.css" rel="stylesheet" />
     <style>
-      html, body { margin: 0; padding: 0; height: 100%; background: #020617; }
+      html, body { margin: 0; padding: 0; height: 100%; background: ${ui.canvas}; }
       #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
       #navPanel {
-        position: absolute; left: 0; right: 0; bottom: 0; max-height: 44vh;
-        background: linear-gradient(180deg, transparent, rgba(2,6,23,0.94) 20%);
-        color: #fff; font-family: system-ui, -apple-system, sans-serif;
-        padding: 12px 14px 22px; pointer-events: auto; overflow-y: auto;
+        position: absolute; left: 0; right: 0; bottom: 0; max-height: 46vh;
+        background: linear-gradient(180deg, transparent, ${ui.isDark ? 'rgba(10,10,10,0.12)' : 'rgba(245,240,230,0.15)'} 12%, ${ui.surface} 28%);
+        color: ${ui.text}; font-family: system-ui, -apple-system, sans-serif;
+        padding: 14px 16px 24px; pointer-events: auto; overflow-y: auto;
+        border-top: 1px solid ${ui.isDark ? 'rgba(201,162,39,0.28)' : 'rgba(201,162,39,0.35)'};
       }
-      .nav-eyebrow { font-size: 10px; letter-spacing: 1.4px; text-transform: uppercase; color: rgba(255,255,255,0.5); }
-      .nav-title { font-size: 15px; font-weight: 700; margin-top: 4px; }
-      .nav-sub { font-size: 12px; color: rgba(255,255,255,0.68); margin-top: 2px; }
+      .nav-eyebrow { font-size: 10px; letter-spacing: 1.6px; text-transform: uppercase; color: ${ui.gold}; font-weight: 700; }
+      .nav-title { font-size: 17px; font-weight: 700; margin-top: 4px; color: ${ui.text}; letter-spacing: -0.02em; }
+      .nav-sub { font-size: 12px; color: ${ui.textMuted}; margin-top: 3px; line-height: 1.4; }
       .nav-live {
-        margin-top: 14px; padding: 14px 14px 12px; border-radius: 16px;
-        background: rgba(15,23,42,0.92); border: 1px solid rgba(59,130,246,0.45);
+        margin-top: 14px; padding: 14px 14px 12px; border-radius: 14px;
+        background: ${ui.isDark ? 'rgba(28,28,28,0.92)' : 'rgba(255,255,255,0.96)'};
+        border: 1px solid ${ui.isDark ? 'rgba(201,162,39,0.35)' : 'rgba(201,162,39,0.45)'};
       }
-      .nav-live-label { font-size: 10px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: rgba(147,197,253,0.95); }
-      .nav-live-main { font-size: 22px; font-weight: 800; margin-top: 6px; letter-spacing: -0.02em; line-height: 1.15; }
-      .nav-live-caption { font-size: 11px; line-height: 1.45; color: rgba(255,255,255,0.65); margin-top: 8px; }
+      .nav-live-label { font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: ${ui.gold}; }
+      .nav-live-main { font-size: 22px; font-weight: 800; margin-top: 6px; letter-spacing: -0.02em; line-height: 1.15; color: ${ui.text}; }
+      .nav-live-caption { font-size: 11px; line-height: 1.45; color: ${ui.textMuted}; margin-top: 8px; }
       .nav-live-badge {
         display: inline-block; margin-top: 10px; font-size: 11px; font-weight: 600;
-        padding: 5px 10px; border-radius: 999px; background: rgba(255,255,255,0.1); color: rgba(255,255,255,0.75);
+        padding: 5px 10px; border-radius: 999px;
+        background: ${ui.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'};
+        color: ${ui.textMuted};
       }
-      .nav-live-badge.on { background: rgba(34,197,94,0.25); color: #86efac; border: 1px solid rgba(34,197,94,0.45); }
-      .nav-sdk-note { font-size: 10px; line-height: 1.4; color: rgba(255,255,255,0.45); margin-top: 10px; }
+      .nav-live-badge.on { background: rgba(34,197,94,0.2); color: #16a34a; border: 1px solid rgba(34,197,94,0.4); }
+      .nav-sdk-note { font-size: 10px; line-height: 1.4; color: ${ui.textMuted}; margin-top: 10px; opacity: 0.85; }
       .nav-upcoming-label {
         font-size: 10px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase;
-        color: rgba(255,255,255,0.42); margin-top: 16px; margin-bottom: 6px;
+        color: ${ui.textMuted}; margin-top: 16px; margin-bottom: 6px;
       }
       .nav-step {
-        font-size: 11px; line-height: 1.4; padding: 7px 0; border-top: 1px solid rgba(255,255,255,0.08);
-        color: rgba(255,255,255,0.55);
+        font-size: 11px; line-height: 1.4; padding: 7px 0;
+        border-top: 1px solid ${ui.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.08)'};
+        color: ${ui.textMuted};
       }
     </style>
   </head>
@@ -682,7 +700,7 @@ const buildGuidanceMapHtml = (
       }
       function renderHeader() {
         panel.innerHTML =
-          '<div class="nav-eyebrow">Live route</div>' +
+          '<div class="nav-eyebrow">Jua navigate</div>' +
           '<div class="nav-title">' + (NAV.title || 'Destination') + '</div>' +
           '<div class="nav-sub">' + (NAV.subtitle || '') + '</div>' +
           '<div id="navBody"></div>';
@@ -705,10 +723,10 @@ const buildGuidanceMapHtml = (
       });
       map.addControl(geo, 'top-left');
       geo.on('trackuserlocationstart', function () {
-        setLiveBadge('Live · map is following your position', true);
+        setLiveBadge('Live · following your position', true);
       });
       geo.on('trackuserlocationend', function () {
-        setLiveBadge('Live tracking paused — tap the arrow on the map to resume', false);
+        setLiveBadge('Paused — tap the arrow on the map to resume', false);
       });
       geo.on('error', function () {
         setLiveBadge('Could not read GPS — check permissions', false);
@@ -735,12 +753,17 @@ const buildGuidanceMapHtml = (
               id: 'nav-route-line',
               type: 'line',
               source: 'nav-route',
-              paint: { 'line-color': '#3B82F6', 'line-width': 6, 'line-opacity': 0.95 },
+              paint: { 'line-color': '${ui.gold}', 'line-width': 5.5, 'line-opacity': 0.94 },
             });
+            var destEl = document.createElement('div');
+            destEl.style.cssText = 'width:14px;height:14px;border-radius:50%;background:${ui.gold};border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.35);';
+            new mapboxgl.Marker({ element: destEl, anchor: 'center' })
+              .setLngLat([d.longitude, d.latitude])
+              .addTo(map);
             var coords = route.geometry.coordinates;
             var b = new mapboxgl.LngLatBounds();
             coords.forEach(function (pt) { b.extend(pt); });
-            map.fitBounds(b, { padding: { top: 72, bottom: 240, left: 16, right: 16 }, duration: 800, maxZoom: 16, essential: true });
+            map.fitBounds(b, { padding: { top: 88, bottom: 260, left: 16, right: 16 }, duration: 800, maxZoom: 16, essential: true });
             var steps = (route.legs && route.legs[0] && route.legs[0].steps) ? route.legs[0].steps : [];
             var progressLine = (distKm != null && durMin != null)
               ? (distKm + ' km · about ' + durMin + ' min')
@@ -754,13 +777,13 @@ const buildGuidanceMapHtml = (
             if (body) {
               body.innerHTML =
                 '<div class="nav-live">' +
-                '<div class="nav-live-label">Progress from your live location</div>' +
+                '<div class="nav-live-label">On route</div>' +
                 '<div class="nav-live-main">' + progressLine + '</div>' +
-                '<div class="nav-live-caption">The blue line is your path. Your dot moves as you move — this screen centers on where you are now, not a fixed list of turns.</div>' +
+                '<div class="nav-live-caption">Gold line is your path. Your dot updates as you move — the map stays centered on you.</div>' +
                 '<div id="liveBadge" class="nav-live-badge">Starting location…</div>' +
-                '<div class="nav-sdk-note">Voice prompts and lane-level guidance ship with Mapbox Navigation SDK (or Google Navigation) in production. Here, turn text is only background context along the route.</div>' +
+                '<div class="nav-sdk-note">Voice and lane guidance ship with Mapbox Navigation SDK in production. Turn list below is preview only.</div>' +
                 '</div>' +
-                (stepsHtml ? '<div class="nav-upcoming-label">Along the route · preview</div>' + stepsHtml : '');
+                (stepsHtml ? '<div class="nav-upcoming-label">Along the route</div>' + stepsHtml : '');
             }
             setTimeout(function () {
               try { if (typeof geo.trigger === 'function') geo.trigger(); } catch (_) {}
@@ -819,7 +842,7 @@ const DARK_THEME: Theme = {
 /** Remote hero shots — section-relevant, cacheable Unsplash URLs. */
 const U = (path: string) => ({ uri: `https://images.unsplash.com/${path}` });
 const IMG = {
-  nairobiCity: U('photo-1611348524140-53c9a25280d9?auto=format&fit=crop&w=960&q=80'),
+  nairobiCity: U('photo-1477959858617-67f85cf4f1df?auto=format&fit=crop&w=960&q=80'),
   coast: U('photo-1573843981267-be1999ff37cd?auto=format&fit=crop&w=960&q=80'),
   lake: U('photo-1439066615861-d1af74d74000?auto=format&fit=crop&w=960&q=80'),
   teaHills: U('photo-1500382017468-9049fed747ef?auto=format&fit=crop&w=960&q=80'),
@@ -841,8 +864,11 @@ const IMG = {
   rentalTown: U('photo-1600047509807-ba8f99d2cdde?auto=format&fit=crop&w=960&q=80'),
   rentalVillage: U('photo-1600585154526-990dced4db0d?auto=format&fit=crop&w=960&q=80'),
   mapPin: U('photo-1524661135-423995f22d0b?auto=format&fit=crop&w=640&q=80'),
-  laundry: U('photo-1626806819282-7aa1deb44bce?auto=format&fit=crop&w=960&q=80'),
-  ridesHero: U('photo-1449965405599-dcc892f827f2?auto=format&fit=crop&w=960&q=80'),
+  laundry: U('photo-1600880292203-757bb62b4baf?auto=format&fit=crop&w=960&q=80'),
+  /** FUA hero — verified Unsplash laundry shots */
+  fuaHero: U('photo-1556909114-f6e7ad7d3136?auto=format&fit=crop&w=1200&q=85'),
+  fuaHeroBasket: U('photo-1571902943202-507ec2618e8f?auto=format&fit=crop&w=1200&q=85'),
+  ridesHero: U('photo-1502877338535-766e1452684a?auto=format&fit=crop&w=960&q=80'),
   staysHero: U('photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&w=960&q=80'),
   clothHero: U('photo-1489987707024-afc025f1b735?auto=format&fit=crop&w=960&q=80'),
   groceryHero: U('photo-1542838132-92c53300491e?auto=format&fit=crop&w=960&q=80'),
@@ -1479,6 +1505,155 @@ const COMING_SOON_SERVICE_INFO: Record<
   },
 };
 
+/** Per-service hero carousels — swipe within a section to learn how it works. */
+const FUA_HERO_SLIDES: IntroHeroSlide[] = [
+  {
+    id: 'fua-intro',
+    eyebrow: 'JUA FUA',
+    title: 'Laundry, picked up fresh',
+    description: 'Mama fua collects from your door or a nearby hub — washed, folded, and returned.',
+    image: IMG.fuaHero,
+    workAreas: ['Door or station', 'Verified partners', 'M-Pesa pay'],
+  },
+  {
+    id: 'fua-pickup',
+    eyebrow: 'STEP 1 · PICKUP',
+    title: 'Choose where we collect',
+    description: 'Use your door for valet pickup, or tap a station on the map and save it to the wizard.',
+    image: IMG.laundry,
+    workAreas: ['Door pickup', 'Hub chips', 'Map view'],
+  },
+  {
+    id: 'fua-load',
+    eyebrow: 'STEP 2 · LOAD',
+    title: 'Tell us the size',
+    description: 'Pay by kilogram or item count — typical load is 3–6 kg for one person.',
+    image: IMG.fuaHeroBasket,
+    workAreas: ['By kg', 'By items', 'Estimate upfront'],
+  },
+  {
+    id: 'fua-trip',
+    eyebrow: 'STEP 3 · TRACK',
+    title: 'Follow on Trips',
+    description: 'After you confirm, your pickup shows on Trips with ETA until laundry is back.',
+    image: IMG.interiorLoft,
+    workAreas: ['30–45 min ETA', 'Trips tab', 'Cancel anytime'],
+  },
+];
+
+const RIDES_HERO_SLIDES: IntroHeroSlide[] = [
+  {
+    id: 'rides-intro',
+    eyebrow: 'JUA RIDES',
+    title: 'Move through the city',
+    description: 'Set pickup, destination, and ride type — one wizard, one fare, one tap to go.',
+    image: IMG.ridesHero,
+    workAreas: ['Step-by-step', 'Live route', 'M-Pesa'],
+  },
+  {
+    id: 'rides-pickup',
+    eyebrow: 'PICKUP',
+    title: 'Your pin or a hub',
+    description: 'Use GPS at your door, or open the map for hubs and top destinations near you.',
+    image: IMG.marketRoad,
+    workAreas: ['My location', 'Pickup hubs', 'Gold destinations'],
+  },
+  {
+    id: 'rides-dest',
+    eyebrow: 'DESTINATION',
+    title: 'Where to, Jua?',
+    description: 'Search, pick a recent place, or tap a gold pin on the map — your choice saves to the wizard.',
+    image: IMG.nairobiCity,
+    workAreas: ['Search', 'Recents', 'Map pins'],
+  },
+  {
+    id: 'rides-pay',
+    eyebrow: 'RIDE & PAY',
+    title: 'Preview, match, go',
+    description: 'See the route on the map, choose Economy or Comfort, then pay when your driver arrives.',
+    image: IMG.coast,
+    workAreas: ['Route preview', 'Ride types', 'Live trip'],
+  },
+];
+
+const STAYS_BNB_HERO_SLIDES: IntroHeroSlide[] = [
+  {
+    id: 'bnb-intro',
+    eyebrow: 'SAKA KEJA',
+    title: 'Stays for every visit',
+    description: 'Short BnBs from trusted hosts — book with M-Pesa and get the full address on confirmation.',
+    image: IMG.staysHero,
+    workAreas: ['Near your pin', 'Book to reveal', 'M-Pesa'],
+  },
+  {
+    id: 'bnb-browse',
+    eyebrow: 'BROWSE',
+    title: 'List or map view',
+    description: 'Swipe the carousel, open the catalog, or switch to map — tap a pin for details.',
+    image: IMG.interiorLake,
+    workAreas: ['List | Map toggle', 'Radius chips', 'See all'],
+  },
+  {
+    id: 'bnb-book',
+    eyebrow: 'BOOK',
+    title: 'Reserve in the sheet',
+    description: 'Tap a stay card to preview photos and highlights, then reserve from the sticky footer.',
+    image: IMG.interiorSea,
+    workAreas: ['Gallery swipe', 'Amenities', 'Trips receipt'],
+  },
+];
+
+const STAYS_RENTAL_HERO_SLIDES: IntroHeroSlide[] = [
+  {
+    id: 'rent-intro',
+    eyebrow: 'SAKA KEJA',
+    title: 'Rentals for longer stays',
+    description: 'Vacant apartments near you — subscribe weekly to unlock exact pins and landlord contact.',
+    image: IMG.rentalModern,
+    workAreas: ['Vacant nearby', 'Weekly unlock', 'Viewings'],
+  },
+  {
+    id: 'rent-map',
+    eyebrow: 'MAP',
+    title: 'Pins in your radius',
+    description: 'Toggle List or Map on the main sheet — purple pins are rentals within your distance cap.',
+    image: IMG.rentalSuburb,
+    workAreas: ['Map toggle', 'Radius km', 'Tap for details'],
+  },
+  {
+    id: 'rent-view',
+    eyebrow: 'VIEWING',
+    title: 'Request after unlock',
+    description: 'Subscribe once, then request a viewing — we log it on Trips for follow-up.',
+    image: IMG.rentalCoast,
+    workAreas: ['KES 499 / week', 'Exact location', 'Landlord contact'],
+  },
+];
+
+const comingSoonHeroSlides = (seg: ComingSoonServiceId): IntroHeroSlide[] => {
+  const info = COMING_SOON_SERVICE_INFO[seg];
+  return [
+    {
+      id: `${seg}-overview`,
+      eyebrow: info.emoji,
+      title: info.title,
+      description: info.lead,
+      image: IMG[info.hero],
+      workAreas: info.features.slice(0, 3),
+      comingSoon: true,
+    },
+    {
+      id: `${seg}-soon`,
+      eyebrow: 'ON THE WAY',
+      title: 'Launching on Jua X',
+      description: 'We are piloting Fua, Saka Keja, and Rides first — this service joins the same app and wallet.',
+      image: IMG.nairobiCity,
+      workAreas: ['Same account', 'M-Pesa ready', 'Notify at launch'],
+      comingSoon: true,
+    },
+  ];
+};
+
 const STAYS_RADIUS_OPTIONS = [2, 5, 10] as const;
 const HOUSE_RADIUS_OPTIONS = [2, 5, 10, 15, 25] as const;
 
@@ -1910,6 +2085,8 @@ export default function App() {
   const [tripStarted, setTripStarted] = useState(false);
   const homeMainMapRef = useRef<WebView>(null);
   const serviceMapWebViewRef = useRef<WebView>(null);
+  const listingsMapWebViewRef = useRef<WebView>(null);
+  const staysHomeMapWebViewRef = useRef<WebView>(null);
   const listingDetailScrollRef = useRef<ScrollView | null>(null);
   const [tripFeed, setTripFeed] = useState<string[]>([]);
   const [laundryQuantity, setLaundryQuantity] = useState(4);
@@ -1954,6 +2131,9 @@ export default function App() {
   /** When `homeDeepPage === 'listing-detail'`, which catalog row is open. */
   const [listingDetail, setListingDetail] = useState<{ kind: ListingCatalog; id: string } | null>(null);
   const [listingCatalog, setListingCatalog] = useState<ListingCatalog>('bnb');
+  const [listingsViewMode, setListingsViewMode] = useState<'list' | 'map'>('list');
+  const [listingsMapSelectedId, setListingsMapSelectedId] = useState<string | null>(null);
+  const [staysSheetViewMode, setStaysSheetViewMode] = useState<'list' | 'map'>('list');
   const [listingCounty, setListingCounty] = useState<ListingCatalogArea>('any');
   const [listingSpace, setListingSpace] = useState<StaySpaceFilter>('any');
   const [listingQuery, setListingQuery] = useState('');
@@ -1966,6 +2146,8 @@ export default function App() {
   const [ridePlannerMeetAssist, setRidePlannerMeetAssist] = useState(false);
   const [ridePickupMode, setRidePickupMode] = useState<'current' | 'station'>('current');
   const [ridePickupStationId, setRidePickupStationId] = useState<string | null>(null);
+  /** Which rides pin type was last tapped on the service map (pickup step). */
+  const [serviceMapRidePinFocus, setServiceMapRidePinFocus] = useState<'hub' | 'destination' | null>(null);
   const [rideWizardStep, setRideWizardStep] = useState<RideWizardStep>('pickup');
   const [laundryWizardStep, setLaundryWizardStep] = useState<FuaWizardStep>('pickup');
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -1992,6 +2174,15 @@ export default function App() {
     if (Platform.OS !== 'android') return;
     RNStatusBar.setBackgroundColor(theme.background, true);
     RNStatusBar.setBarStyle(themeMode === 'dark' ? 'light-content' : 'dark-content');
+    void (async () => {
+      try {
+        await NavigationBar.setPositionAsync('absolute');
+        await NavigationBar.setBackgroundColorAsync(theme.background);
+        await NavigationBar.setButtonStyleAsync(themeMode === 'dark' ? 'light' : 'dark');
+      } catch {
+        /* navigation bar API unavailable on some builds */
+      }
+    })();
   }, [theme.background, themeMode]);
   const gutter = Math.min(24, Math.max(14, Math.round(windowWidth * 0.042)));
   const tabBarInnerHeight = 56;
@@ -2126,6 +2317,24 @@ export default function App() {
         setHomeListingPreview({ catalog: data.catalog, id: String(data.id) });
         return;
       }
+      if (data.type === 'listingMapSelect' && data.id && (data.catalog === 'bnb' || data.catalog === 'house')) {
+        if (data.catalog === 'bnb') {
+          setSelectedBnbId(String(data.id));
+          setSelectedHouseId(null);
+          setStaysSubTab('bnb');
+        } else {
+          setSelectedHouseId(String(data.id));
+          setSelectedBnbId(null);
+          setStaysSubTab('rental');
+        }
+        if (homeDeepPage === 'listings') {
+          setListingsMapSelectedId(String(data.id));
+          setListingCatalog(data.catalog);
+        } else {
+          setHomeSheetStageAnimated('full');
+        }
+        return;
+      }
       if (data.type === 'exploreSelectArticle' && data.id) {
         const art = EXPLORE_ARTICLES.find((a) => a.id === data.id);
         if (!art) return;
@@ -2199,20 +2408,35 @@ export default function App() {
         setRidePickupMode('station');
         setRideWizardStep('pickup');
         setPhaseForService('rides', 'selecting');
+        setServiceMapRidePinFocus(null);
         setHomeDeepPage(null);
         setHomeSheetStageAnimated('mid');
         setBookingMessage('Pickup hub saved — continue in the ride wizard.');
         return;
       }
+      if (data.type === 'ridePickupMapSelect' && data.id) {
+        if (!PICKUP_STATIONS.some((s) => s.id === data.id)) return;
+        setRidePickupStationId(data.id);
+        setRidePickupMode('station');
+        setServiceMapRidePinFocus('hub');
+        return;
+      }
+      if (data.type === 'rideDestinationMapSelect' && data.id) {
+        const dest = DESTINATIONS.find((d) => d.id === data.id);
+        if (!dest) return;
+        setSelectedDestination(dest);
+        setDestinationQuery(dest.subtitle);
+        setServiceMapRidePinFocus('destination');
+        return;
+      }
       if (data.type === 'rideDestination' && data.id) {
-        const dest =
-          DESTINATIONS.find((d) => d.id === data.id) ??
-          popularNearbyDestinations.find((d) => d.id === data.id);
+        const dest = DESTINATIONS.find((d) => d.id === data.id);
         if (!dest) return;
         setSelectedDestination(dest);
         setDestinationQuery(dest.subtitle);
         setRideWizardStep('destination');
         setPhaseForService('rides', 'selecting');
+        setServiceMapRidePinFocus(null);
         setHomeDeepPage(null);
         setHomeSheetStageAnimated('mid');
         setBookingMessage(`Destination set · ${dest.name}`);
@@ -2237,6 +2461,11 @@ export default function App() {
         setHomeDeepPage(null);
         setHomeSheetStageAnimated('mid');
         setBookingMessage('Pickup station saved — continue in the Fua wizard.');
+        return;
+      }
+      if (data.type === 'laundryStationMapSelect' && data.id) {
+        if (!PICKUP_STATIONS.some((s) => s.id === data.id)) return;
+        setLaundryStationId(data.id);
         return;
       }
       if (data.type === 'laundryStation' && data.id) {
@@ -2338,6 +2567,15 @@ export default function App() {
     }
     return rows;
   }, [listingCounty, listingQuery, listingRadiusKm, currentCoords]);
+  const listingsMapHighlight = useMemo(() => {
+    if (!listingsMapSelectedId) return null;
+    if (listingCatalog === 'bnb') {
+      const b = catalogBnbs.find((x) => x.id === listingsMapSelectedId);
+      return b ? b.coords : null;
+    }
+    const h = catalogHouses.find((x) => x.id === listingsMapSelectedId);
+    return h ? h.coords : null;
+  }, [listingsMapSelectedId, listingCatalog, catalogBnbs, catalogHouses]);
   const listingDetailEntity = useMemo((): BnbListing | HouseListing | null => {
     if (!listingDetail) return null;
     if (listingDetail.kind === 'bnb') {
@@ -2352,6 +2590,10 @@ export default function App() {
   }, [listingDetail, catalogBnbs, catalogHouses]);
   const focusedBnb = selectedBnbId ? nearbyBnbs.find((b) => b.id === selectedBnbId) ?? null : null;
   const focusedHouse = selectedHouseId ? nearbyHouses.find((h) => h.id === selectedHouseId) ?? null : null;
+  const staysHomeMapHighlight = useMemo(() => {
+    if (staysSubTab === 'rental') return focusedHouse?.coords ?? null;
+    return focusedBnb?.coords ?? null;
+  }, [staysSubTab, focusedHouse, focusedBnb]);
   const tourListing =
     tourSheetTarget?.kind === 'bnb'
       ? BNB_LISTINGS.find((b) => b.id === tourSheetTarget.id) ?? null
@@ -2566,6 +2808,139 @@ export default function App() {
     serviceMapViewportPad,
   ]);
 
+  const staysHomeMapHtml = useMemo(() => {
+    if (!MAPBOX_ACCESS_TOKEN) return null;
+    const isRental = staysSubTab === 'rental';
+    const rows = isRental ? nearbyHouses : nearbyBnbs;
+    const pins: HomeUnifiedPin[] = rows.map((row) =>
+      isRental
+        ? {
+            id: (row as HouseListing).id,
+            title: (row as HouseListing).title,
+            subtitle: `${(row as HouseListing).distanceKm} km · ${(row as HouseListing).price}`,
+            coords: (row as HouseListing).coords,
+            kind: 'house' as const,
+          }
+        : {
+            id: (row as BnbListing).id,
+            title: (row as BnbListing).title,
+            subtitle: `${(row as BnbListing).county} · ${(row as BnbListing).rating} ★ · ${(row as BnbListing).price}`,
+            coords: (row as BnbListing).coords,
+            kind: 'bnb' as const,
+          },
+    );
+    const banks: HomeUnifiedBanks = {
+      laundry: [],
+      bnbs: isRental ? [] : pins,
+      houses: isRental ? pins : [],
+      rides: [],
+      destinations: [],
+    };
+    return buildUnifiedHomeServicesMapHtml(
+      MAPBOX_ACCESS_TOKEN,
+      theme.mapStyleId,
+      banks,
+      currentCoords,
+      theme.canvas,
+      { top: 40, bottom: 40, left: 12, right: 12 },
+    );
+  }, [MAPBOX_ACCESS_TOKEN, theme.mapStyleId, theme.canvas, staysSubTab, nearbyBnbs, nearbyHouses, currentCoords]);
+
+  const listingsMapHtml = useMemo(() => {
+    if (!MAPBOX_ACCESS_TOKEN) return null;
+    const rows = listingCatalog === 'bnb' ? catalogBnbs : catalogHouses;
+    const pins: HomeUnifiedPin[] = rows.map((row) =>
+      listingCatalog === 'bnb'
+        ? {
+            id: (row as BnbListing).id,
+            title: (row as BnbListing).title,
+            subtitle: `${(row as BnbListing).county} · ${(row as BnbListing).rating} ★ · ${(row as BnbListing).price}`,
+            coords: (row as BnbListing).coords,
+            kind: 'bnb' as const,
+          }
+        : {
+            id: (row as HouseListing).id,
+            title: (row as HouseListing).title,
+            subtitle: `${(row as HouseListing).distanceKm} km · ${(row as HouseListing).price}`,
+            coords: (row as HouseListing).coords,
+            kind: 'house' as const,
+          },
+    );
+    const banks: HomeUnifiedBanks = {
+      laundry: [],
+      bnbs: listingCatalog === 'bnb' ? pins : [],
+      houses: listingCatalog === 'house' ? pins : [],
+      rides: [],
+      destinations: [],
+    };
+    return buildUnifiedHomeServicesMapHtml(
+      MAPBOX_ACCESS_TOKEN,
+      theme.mapStyleId,
+      banks,
+      currentCoords,
+      theme.canvas,
+      {
+        top: Math.round(serviceMapViewportPad.top),
+        bottom: Math.round(serviceMapViewportPad.bottom + 72),
+        left: Math.round(serviceMapViewportPad.left),
+        right: Math.round(serviceMapViewportPad.right),
+      },
+    );
+  }, [
+    MAPBOX_ACCESS_TOKEN,
+    theme.mapStyleId,
+    theme.canvas,
+    listingCatalog,
+    catalogBnbs,
+    catalogHouses,
+    currentCoords,
+    serviceMapViewportPad,
+  ]);
+
+  const injectListingsMapSync = useCallback(() => {
+    const wv = listingsMapWebViewRef.current;
+    if (!wv || !MAPBOX_ACCESS_TOKEN || !listingsMapHtml) return;
+    const mode = listingCatalog === 'bnb' ? 'bnbs' : 'houses';
+    const hl = listingsMapHighlight;
+    const hlJs =
+      hl != null
+        ? `if(window.juaSetHighlight)window.juaSetHighlight(${hl.longitude},${hl.latitude});`
+        : 'if(window.juaSetHighlight)window.juaSetHighlight(null,null);';
+    const userJs = currentCoords
+      ? `if(window.juaSetUserCoords)window.juaSetUserCoords({longitude:${currentCoords.longitude},latitude:${currentCoords.latitude}});`
+      : '';
+    wv.injectJavaScript(
+      `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
+        mode,
+      )});${hlJs}${userJs}}catch(e){}},80);true;`,
+    );
+  }, [
+    MAPBOX_ACCESS_TOKEN,
+    listingsMapHtml,
+    listingCatalog,
+    listingsMapHighlight,
+    currentCoords,
+  ]);
+
+  const injectStaysHomeMapSync = useCallback(() => {
+    const wv = staysHomeMapWebViewRef.current;
+    if (!wv || !MAPBOX_ACCESS_TOKEN || !staysHomeMapHtml) return;
+    const mode = staysSubTab === 'rental' ? 'houses' : 'bnbs';
+    const hl = staysHomeMapHighlight;
+    const hlJs =
+      hl != null
+        ? `if(window.juaSetHighlight)window.juaSetHighlight(${hl.longitude},${hl.latitude});`
+        : 'if(window.juaSetHighlight)window.juaSetHighlight(null,null);';
+    const userJs = currentCoords
+      ? `if(window.juaSetUserCoords)window.juaSetUserCoords({longitude:${currentCoords.longitude},latitude:${currentCoords.latitude}});`
+      : '';
+    wv.injectJavaScript(
+      `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
+        mode,
+      )});${hlJs}${userJs}}catch(e){}},80);true;`,
+    );
+  }, [MAPBOX_ACCESS_TOKEN, staysHomeMapHtml, staysSubTab, staysHomeMapHighlight, currentCoords]);
+
   const injectHomeMapSync = useCallback(() => {
     const wv = homeMainMapRef.current;
     if (!wv || activeService === 'rides' || !MAPBOX_ACCESS_TOKEN || !unifiedHomeMapHtml) return;
@@ -2602,7 +2977,7 @@ export default function App() {
     const ridesFocus = activeService === 'rides' && rideWizardStep === 'destination' ? 'destination' : 'pickup';
     const hl =
       activeService === 'rides'
-        ? rideWizardStep === 'destination'
+        ? rideWizardStep === 'destination' || serviceMapRidePinFocus === 'destination'
           ? selectedDestination.coords
           : rideMapHighlight
         : activeService === 'laundry'
@@ -2633,6 +3008,7 @@ export default function App() {
     laundryMapHighlight,
     rideMapHighlight,
     rideWizardStep,
+    serviceMapRidePinFocus,
     selectedDestination.coords,
     currentCoords,
     pickupAdjustMode,
@@ -2670,10 +3046,65 @@ export default function App() {
   }, [injectMapSync]);
 
   useEffect(() => {
-    if (homeDeepPage === 'service-map') {
-      injectServiceMapSync();
+    if (activeService !== 'bnbs' && activeService !== 'houses') {
+      setStaysSheetViewMode('list');
     }
-  }, [homeDeepPage, injectServiceMapSync, rideWizardStep, laundryWizardStep, activeService]);
+  }, [activeService]);
+
+  useEffect(() => {
+    if (
+      (activeService === 'bnbs' || activeService === 'houses') &&
+      staysSheetViewMode === 'map' &&
+      homeDeepPage === null
+    ) {
+      injectStaysHomeMapSync();
+      if (!currentCoords) void fetchCurrentLocation();
+    }
+  }, [
+    activeService,
+    staysSheetViewMode,
+    homeDeepPage,
+    injectStaysHomeMapSync,
+    staysSubTab,
+    nearbyBnbs,
+    nearbyHouses,
+    staysRadiusKm,
+    selectedBnbId,
+    selectedHouseId,
+    currentCoords,
+  ]);
+
+  useEffect(() => {
+    if (homeDeepPage === 'service-map') {
+      setServiceMapRidePinFocus(null);
+      injectServiceMapSync();
+      if (!currentCoords) void fetchCurrentLocation();
+    }
+    if (homeDeepPage !== 'listings') {
+      setListingsViewMode('list');
+      setListingsMapSelectedId(null);
+    }
+  }, [homeDeepPage, injectServiceMapSync, rideWizardStep, laundryWizardStep, activeService, currentCoords]);
+
+  useEffect(() => {
+    setListingsMapSelectedId(null);
+  }, [listingCatalog, listingCounty, listingQuery, listingSpace, listingRadiusKm]);
+
+  useEffect(() => {
+    if (homeDeepPage === 'listings' && listingsViewMode === 'map') {
+      injectListingsMapSync();
+      if (!currentCoords) void fetchCurrentLocation();
+    }
+  }, [
+    homeDeepPage,
+    listingsViewMode,
+    injectListingsMapSync,
+    listingCatalog,
+    catalogBnbs,
+    catalogHouses,
+    listingsMapSelectedId,
+    currentCoords,
+  ]);
 
   useEffect(() => {
     if (isActiveTripMode) {
@@ -2695,6 +3126,14 @@ export default function App() {
 
   const guidanceMapHtml = useMemo(() => {
     if (!MAPBOX_ACCESS_TOKEN || !currentCoords || !guidedJourney) return null;
+    const ui: GuidanceUiTheme = {
+      canvas: theme.canvas,
+      surface: theme.sheet,
+      text: theme.textPrimary,
+      textMuted: theme.textMuted,
+      gold: BRAND.gold,
+      isDark: themeMode === 'dark',
+    };
     return buildGuidanceMapHtml(
       MAPBOX_ACCESS_TOKEN,
       theme.mapStyleId,
@@ -2702,8 +3141,9 @@ export default function App() {
       guidedJourney.end,
       guidedJourney.title,
       guidedJourney.subtitle,
+      ui,
     );
-  }, [MAPBOX_ACCESS_TOKEN, theme.mapStyleId, currentCoords, guidedJourney]);
+  }, [MAPBOX_ACCESS_TOKEN, theme.mapStyleId, theme.canvas, theme.sheet, theme.textPrimary, theme.textMuted, themeMode, currentCoords, guidedJourney]);
 
   const isInKenya = (coords: Coordinates) =>
     coords.latitude >= -5.2 &&
@@ -4128,7 +4568,7 @@ export default function App() {
         : activeService === 'rides'
           ? rideWizardStep === 'destination'
             ? 'Top destinations near you'
-            : 'Ride pickup hubs'
+            : 'Pickup hubs & destinations'
           : staysSubTab === 'rental'
             ? 'Rentals around you'
             : 'BnBs around you';
@@ -4156,21 +4596,15 @@ export default function App() {
           ? (BNB_LISTINGS.find((b) => b.id === homeListingPreview.id) ?? null)
           : (HOUSE_LISTINGS.find((h) => h.id === homeListingPreview.id) ?? null);
 
-    const renderServiceHero = (
-      image: (typeof IMG)[keyof typeof IMG],
-      eyebrow: string,
-      title: string,
-      desc: string,
-    ) => (
-      <View style={[styles.serviceHero, { borderColor: theme.border }]}>
-        <Image source={image} style={styles.serviceHeroImage} resizeMode="cover" />
-        <View style={styles.serviceHeroOverlay} />
-        <View style={styles.serviceHeroContent}>
-          <Text style={styles.serviceHeroEyebrow}>{eyebrow}</Text>
-          <Text style={styles.serviceHeroTitle}>{title}</Text>
-          <Text style={styles.serviceHeroDesc}>{desc}</Text>
-        </View>
-      </View>
+    const heroCardWidth = windowWidth - gutter * 2;
+    const renderSectionHero = (slides: IntroHeroSlide[], hint: string, height = 200) => (
+      <IntroHeroCarousel
+        slides={slides}
+        cardWidth={heroCardWidth}
+        cardHeight={height}
+        darkMode={themeMode === 'dark'}
+        hint={hint}
+      />
     );
 
     const sheetInner = (() => {
@@ -4178,7 +4612,7 @@ export default function App() {
         const info = COMING_SOON_SERVICE_INFO[activeSegment];
         return (
           <>
-            {renderServiceHero(IMG[info.hero], info.emoji, info.title, info.lead)}
+            {renderSectionHero(comingSoonHeroSlides(activeSegment), `How ${info.title} will work`)}
             <View style={[styles.comingSoonEmojiBanner, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
               <Text style={[styles.comingSoonEmojiBannerText, { color: theme.primary }]}>
                 {info.emoji} Coming soon
@@ -4443,13 +4877,8 @@ export default function App() {
             ) : null;
           return (
             <>
-              {rideWizardStep === 'pickup'
-                ? renderServiceHero(
-                    IMG.ridesHero,
-                    'JUA RIDES',
-                    'Move through the city',
-                    'We will walk you through pickup, destination, and ride type — one step at a time.',
-                  )
+              {isRideBookingWizardStep(rideWizardStep)
+                ? renderSectionHero(RIDES_HERO_SLIDES, 'How Jua Rides works')
                 : null}
               {isRideBookingWizardStep(rideWizardStep) ? renderWizardChrome() : null}
               {rideWizardStep === 'pickup' ? (
@@ -4517,8 +4946,10 @@ export default function App() {
                     </ScrollView>
                   ) : null}
                   <Pressable style={styles.homeDeepEntryRow} onPress={() => setHomeDeepPage('service-map')}>
-                    <Text style={styles.homeDeepEntryTitle}>Pickup hubs on map ›</Text>
-                    <Text style={styles.homeDeepEntrySub}>Tap a hub pin — your choice saves to this step</Text>
+                    <Text style={styles.homeDeepEntryTitle}>Hubs & destinations on map ›</Text>
+                    <Text style={styles.homeDeepEntrySub}>
+                      Blue = hub · gold = destination — tap, confirm, return to wizard
+                    </Text>
                   </Pressable>
                 </>
               ) : null}
@@ -4729,13 +5160,8 @@ export default function App() {
           const bookingMeta = FUA_WIZARD_BOOKING[bookingIndex];
           return (
             <>
-              {laundryWizardStep === 'pickup'
-                ? renderServiceHero(
-                    IMG.laundry,
-                    'JUA FUA',
-                    'Laundry, picked up fresh',
-                    'We will walk you through pickup, load size, and confirmation — one step at a time.',
-                  )
+              {FUA_WIZARD_BOOKING_ORDER.includes(laundryWizardStep)
+                ? renderSectionHero(FUA_HERO_SLIDES, 'How Jua Fua works')
                 : null}
               {bookingMeta ? (
                 <>
@@ -4926,6 +5352,8 @@ export default function App() {
           const stayRows = isRental ? featuredHouses : featuredBnbs;
           const stayCount = isRental ? nearbyHouses.length : nearbyBnbs.length;
           const compactDetail = homeSheetStage !== 'full';
+          const staysMapHeight =
+            homeSheetStage === 'full' ? 300 : homeSheetStage === 'mid' ? 228 : 188;
           return (
             <>
               <View style={styles.staysSubSegment}>
@@ -4944,13 +5372,9 @@ export default function App() {
                   );
                 })}
               </View>
-              {renderServiceHero(
-                IMG.staysHero,
-                'SAKA KEJA',
-                isRental ? 'Rentals for longer stays' : 'Stays for every visit',
-                isRental
-                  ? 'Vacant apartments near you — unlock exact locations and book viewings with a weekly subscription.'
-                  : 'Short stays from trusted hosts. Book with M-Pesa and get the full address on confirmation.',
+              {renderSectionHero(
+                isRental ? STAYS_RENTAL_HERO_SLIDES : STAYS_BNB_HERO_SLIDES,
+                isRental ? 'How rentals work' : 'How BnBs work',
               )}
               <Text style={styles.valetSheetTag}>Kisumu pilot · {currentCounty}</Text>
               <Text style={styles.valetSheetLead}>
@@ -4977,27 +5401,102 @@ export default function App() {
                   );
                 })}
               </View>
-              <Pressable style={styles.homeDeepEntryRow} onPress={() => setHomeDeepPage('service-map')}>
-                <Text style={styles.homeDeepEntryTitle}>
-                  {isRental ? 'Rentals around you' : 'BnBs around you'} ›
-                </Text>
-                <Text style={styles.homeDeepEntrySub}>Map view · tap a pin to preview or open listing</Text>
-              </Pressable>
               <View style={styles.juxSectionRow}>
                 <Text style={styles.juxSectionLabel}>{isRental ? 'Vacant nearby' : 'Stays nearby'}</Text>
-                <Pressable
-                  onPress={() => {
-                    setListingCatalog(isRental ? 'house' : 'bnb');
-                    setListingRadiusKm(staysRadiusKm);
-                    setHomeDeepPage('listings');
-                    setHomeSheetStageAnimated('full');
-                  }}
-                  hitSlop={8}
-                >
-                  <Text style={styles.juxSeeAll}>See all</Text>
-                </Pressable>
+                <View style={styles.staysSectionActions}>
+                  <View style={styles.listingsViewToggle}>
+                    <Pressable
+                      style={[styles.listingsViewChip, staysSheetViewMode === 'list' && styles.listingsViewChipOn]}
+                      onPress={() => setStaysSheetViewMode('list')}
+                    >
+                      <Text
+                        style={[
+                          styles.listingsViewChipText,
+                          staysSheetViewMode === 'list' && styles.listingsViewChipTextOn,
+                        ]}
+                      >
+                        List
+                      </Text>
+                    </Pressable>
+                    <Pressable
+                      style={[styles.listingsViewChip, staysSheetViewMode === 'map' && styles.listingsViewChipOn]}
+                      onPress={() => {
+                        setStaysSheetViewMode('map');
+                        if (!currentCoords) void fetchCurrentLocation();
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.listingsViewChipText,
+                          staysSheetViewMode === 'map' && styles.listingsViewChipTextOn,
+                        ]}
+                      >
+                        Map
+                      </Text>
+                    </Pressable>
+                  </View>
+                  <Pressable
+                    onPress={() => {
+                      setListingCatalog(isRental ? 'house' : 'bnb');
+                      setListingRadiusKm(staysRadiusKm);
+                      setHomeDeepPage('listings');
+                      setHomeSheetStageAnimated('full');
+                    }}
+                    hitSlop={8}
+                  >
+                    <Text style={styles.juxSeeAll}>See all</Text>
+                  </Pressable>
+                </View>
               </View>
-              {stayRows.length > 0 ? (
+              {staysSheetViewMode === 'map' ? (
+                <>
+                  <Text style={styles.homeDeepCount}>
+                    {stayCount} on map within {staysRadiusKm} km · tap a pin for details
+                  </Text>
+                  <View style={[styles.staysHomeMapBand, { height: staysMapHeight }]}>
+                    {staysHomeMapHtml ? (
+                      <WebView
+                        ref={staysHomeMapWebViewRef}
+                        source={{ html: staysHomeMapHtml }}
+                        style={StyleSheet.absoluteFillObject}
+                        originWhitelist={['*']}
+                        javaScriptEnabled
+                        domStorageEnabled
+                        scrollEnabled={false}
+                        bounces={false}
+                        setSupportMultipleWindows={false}
+                        mixedContentMode="always"
+                        onMessage={onHomeMapWebViewMessage}
+                        onLoadEnd={() => {
+                          injectStaysHomeMapSync();
+                        }}
+                        {...ANDROID_MAP_WEBVIEW_PROPS}
+                      />
+                    ) : (
+                      <View style={styles.serviceMapFallback}>
+                        <Text style={styles.serviceMapFallbackText}>
+                          Add EXPO_PUBLIC_MAPBOX_TOKEN to view stays on the map.
+                        </Text>
+                      </View>
+                    )}
+                    <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 6, left: 8 }]}>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
+                        <Text style={styles.serviceMapLegendText}>You</Text>
+                      </View>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View
+                          style={[
+                            styles.serviceMapLegendDot,
+                            { backgroundColor: isRental ? '#A78BFA' : '#F472B6' },
+                          ]}
+                        />
+                        <Text style={styles.serviceMapLegendText}>{isRental ? 'Rental' : 'BnB'}</Text>
+                      </View>
+                    </View>
+                  </View>
+                </>
+              ) : stayRows.length > 0 ? (
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
@@ -5060,7 +5559,11 @@ export default function App() {
                         );
                       })}
                 </ScrollView>
-              ) : null}
+              ) : (
+                <Text style={styles.juxHintMuted}>
+                  {isRental ? 'No rentals in range — widen radius.' : 'No stays in this area yet.'}
+                </Text>
+              )}
               {stayCount > 0 ? (
                 <Pressable
                   style={styles.homeDeepEntryRow}
@@ -5617,6 +6120,42 @@ export default function App() {
           />
         );
       }
+      if (homeDeepPage === 'listings' && listingsViewMode === 'map' && listingsMapSelectedId) {
+        const mapListing =
+          listingCatalog === 'bnb'
+            ? catalogBnbs.find((b) => b.id === listingsMapSelectedId)
+            : catalogHouses.find((h) => h.id === listingsMapSelectedId);
+        if (mapListing) {
+          const title = mapListing.title;
+          const price = mapListing.price;
+          return (
+            <SheetStickyFooter
+              label="View listing details"
+              sublabel={`${title} · ${price}`}
+              darkMode={themeMode === 'dark'}
+              style={{ paddingBottom: insets.bottom + 8 }}
+              onPress={() => {
+                setHomeListingPreview(null);
+                if (listingCatalog === 'bnb') {
+                  setSelectedBnbId(mapListing.id);
+                  setSelectedHouseId(null);
+                  setActiveService('bnbs');
+                  setActiveSegment('bnbs');
+                  setListingDetail({ kind: 'bnb', id: mapListing.id });
+                } else {
+                  setSelectedHouseId(mapListing.id);
+                  setSelectedBnbId(null);
+                  setActiveService('bnbs');
+                  setActiveSegment('bnbs');
+                  setStaysSubTab('rental');
+                  setListingDetail({ kind: 'house', id: mapListing.id });
+                }
+                setHomeDeepPage('listing-detail');
+              }}
+            />
+          );
+        }
+      }
       if (homeDeepPage === 'valet-studio') {
         return (
           <SheetStickyFooter
@@ -5663,8 +6202,8 @@ export default function App() {
         if (laundryStation && activeService === 'laundry') {
           return (
             <SheetStickyFooter
-              label="Use station & return"
-              sublabel={laundryStation.name}
+              label="Use pickup station"
+              sublabel={`${laundryStation.name} · return to wizard`}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
               onPress={() => {
@@ -5672,15 +6211,43 @@ export default function App() {
                 setLaundryWizardStep('pickup');
                 setHomeSheetStageAnimated('mid');
                 setPhaseForService('laundry', 'selecting');
+                setBookingMessage('Pickup station saved — continue in the Fua wizard.');
               }}
             />
           );
         }
-        if (rideHub && activeService === 'rides' && rideWizardStep === 'pickup') {
+        if (
+          activeService === 'rides' &&
+          rideWizardStep === 'pickup' &&
+          serviceMapRidePinFocus === 'destination'
+        ) {
           return (
             <SheetStickyFooter
-              label="Use hub & return"
-              sublabel={rideHub.name}
+              label="Use destination"
+              sublabel={`${selectedDestination.name} · return to wizard`}
+              darkMode={themeMode === 'dark'}
+              style={{ paddingBottom: insets.bottom + 8 }}
+              onPress={() => {
+                setHomeDeepPage(null);
+                setRideWizardStep('destination');
+                setHomeSheetStageAnimated('mid');
+                setPhaseForService('rides', 'selecting');
+                setServiceMapRidePinFocus(null);
+                setBookingMessage(`Destination set · ${selectedDestination.name}`);
+              }}
+            />
+          );
+        }
+        if (
+          rideHub &&
+          activeService === 'rides' &&
+          rideWizardStep === 'pickup' &&
+          serviceMapRidePinFocus === 'hub'
+        ) {
+          return (
+            <SheetStickyFooter
+              label="Use pickup hub"
+              sublabel={`${rideHub.name} · return to wizard`}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
               onPress={() => {
@@ -5689,6 +6256,8 @@ export default function App() {
                 setRideWizardStep('pickup');
                 setHomeSheetStageAnimated('mid');
                 setPhaseForService('rides', 'selecting');
+                setServiceMapRidePinFocus(null);
+                setBookingMessage('Pickup hub saved — continue in the ride wizard.');
               }}
             />
           );
@@ -5696,8 +6265,8 @@ export default function App() {
         if (activeService === 'rides' && rideWizardStep === 'destination') {
           return (
             <SheetStickyFooter
-              label="Use destination & return"
-              sublabel={selectedDestination.name}
+              label="Use destination"
+              sublabel={`${selectedDestination.name} · return to wizard`}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
               onPress={() => {
@@ -5705,6 +6274,7 @@ export default function App() {
                 setRideWizardStep('destination');
                 setHomeSheetStageAnimated('mid');
                 setPhaseForService('rides', 'selecting');
+                setBookingMessage(`Destination set · ${selectedDestination.name}`);
               }}
             />
           );
@@ -5714,11 +6284,11 @@ export default function App() {
             label="Back to wizard"
             sublabel={
               activeService === 'laundry'
-                ? 'Tap a station pin to save your pickup'
+                ? 'Green pin = you · orange = station — tap a pin to select'
                 : activeService === 'rides' && rideWizardStep === 'destination'
                   ? 'Tap a gold pin for your destination'
                   : activeService === 'rides'
-                    ? 'Tap a hub pin to save your pickup'
+                    ? 'Green = you · blue = hub · gold = destination — tap a pin'
                     : 'Tap a pin to preview a listing'
             }
             darkMode={themeMode === 'dark'}
@@ -5971,6 +6541,41 @@ export default function App() {
                 </Pressable>
                 {homeDeepPage === 'service-map' ? (
                   <Text style={styles.homeDeepMapTitle}>{serviceMapTitle}</Text>
+                ) : homeDeepPage === 'listings' ? (
+                  <View style={styles.listingsHeaderRow}>
+                    <Text style={styles.homeDeepMapTitle}>Listings</Text>
+                    <View style={styles.listingsViewToggle}>
+                      <Pressable
+                        style={[styles.listingsViewChip, listingsViewMode === 'list' && styles.listingsViewChipOn]}
+                        onPress={() => setListingsViewMode('list')}
+                      >
+                        <Text
+                          style={[
+                            styles.listingsViewChipText,
+                            listingsViewMode === 'list' && styles.listingsViewChipTextOn,
+                          ]}
+                        >
+                          List
+                        </Text>
+                      </Pressable>
+                      <Pressable
+                        style={[styles.listingsViewChip, listingsViewMode === 'map' && styles.listingsViewChipOn]}
+                        onPress={() => {
+                          setListingsViewMode('map');
+                          if (!currentCoords) void fetchCurrentLocation();
+                        }}
+                      >
+                        <Text
+                          style={[
+                            styles.listingsViewChipText,
+                            listingsViewMode === 'map' && styles.listingsViewChipTextOn,
+                          ]}
+                        >
+                          Map
+                        </Text>
+                      </Pressable>
+                    </View>
+                  </View>
                 ) : null}
               </View>
               {homeDeepPage === 'service-map' ? (
@@ -6001,11 +6606,41 @@ export default function App() {
                     </View>
                   )}
                   <View style={[styles.mapLocationBanner, { top: 8, left: 0, right: 0 }]}>
-                    <View style={styles.mapLocationDot} />
+                    <View style={[styles.mapLocationDot, { backgroundColor: '#22c55e' }]} />
                     <Text style={styles.mapLocationText} numberOfLines={1}>
-                      {locationLoading ? 'Locating…' : currentLocationLabel}
+                      {locationLoading
+                        ? 'Locating you…'
+                        : currentCoords
+                          ? `You are here · ${currentLocationLabel}`
+                          : 'Tap ◎ to show your location'}
                     </Text>
                   </View>
+                  {activeService === 'laundry' ||
+                  (activeService === 'rides' && rideWizardStep === 'pickup') ? (
+                    <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 48 }]}>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
+                        <Text style={styles.serviceMapLegendText}>You are here</Text>
+                      </View>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View
+                          style={[
+                            styles.serviceMapLegendDot,
+                            { backgroundColor: activeService === 'laundry' ? '#F59E0B' : '#38BDF8' },
+                          ]}
+                        />
+                        <Text style={styles.serviceMapLegendText}>
+                          {activeService === 'laundry' ? 'Pickup station' : 'Pickup hub'}
+                        </Text>
+                      </View>
+                      {activeService === 'rides' && rideWizardStep === 'pickup' ? (
+                        <View style={styles.serviceMapLegendRow}>
+                          <View style={[styles.serviceMapLegendDot, { backgroundColor: '#C9A227' }]} />
+                          <Text style={styles.serviceMapLegendText}>Top destination</Text>
+                        </View>
+                      ) : null}
+                    </View>
+                  ) : null}
                   {mapNeedsRecenter ? (
                     <Pressable style={[styles.recenterChip, { bottom: 16 }]} onPress={recenterMapOnUser}>
                       <Text style={styles.recenterChipIcon}>◎</Text>
@@ -6023,13 +6658,106 @@ export default function App() {
                   </View>
                 </View>
               ) : homeDeepPage === 'listings' ? (
+                listingsViewMode === 'map' ? (
+                  <View style={styles.listingsMapShell}>
+                    <View style={styles.valetSegmentTrack}>
+                      <Pressable
+                        style={[styles.valetSegment, listingCatalog === 'bnb' && styles.valetSegmentActive]}
+                        onPress={() => setListingCatalog('bnb')}
+                      >
+                        <Text
+                          style={[styles.valetSegmentText, listingCatalog === 'bnb' && styles.valetSegmentTextActive]}
+                        >
+                          BnBs
+                        </Text>
+                      </Pressable>
+                      <View style={styles.valetSegmentDivider} />
+                      <Pressable
+                        style={[styles.valetSegment, listingCatalog === 'house' && styles.valetSegmentActive]}
+                        onPress={() => setListingCatalog('house')}
+                      >
+                        <Text
+                          style={[styles.valetSegmentText, listingCatalog === 'house' && styles.valetSegmentTextActive]}
+                        >
+                          Rentals
+                        </Text>
+                      </Pressable>
+                    </View>
+                    <Text style={styles.homeDeepCount}>
+                      {(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin for
+                      details
+                    </Text>
+                    <View style={styles.listingsMapBody}>
+                      {listingsMapHtml ? (
+                        <WebView
+                          ref={listingsMapWebViewRef}
+                          source={{ html: listingsMapHtml }}
+                          style={StyleSheet.absoluteFillObject}
+                          originWhitelist={['*']}
+                          javaScriptEnabled
+                          domStorageEnabled
+                          scrollEnabled={false}
+                          bounces={false}
+                          setSupportMultipleWindows={false}
+                          mixedContentMode="always"
+                          onMessage={onHomeMapWebViewMessage}
+                          onLoadEnd={() => {
+                            injectListingsMapSync();
+                          }}
+                          {...ANDROID_MAP_WEBVIEW_PROPS}
+                        />
+                      ) : (
+                        <View style={styles.serviceMapFallback}>
+                          <Text style={styles.serviceMapFallbackText}>
+                            Add EXPO_PUBLIC_MAPBOX_TOKEN to view listings on the map.
+                          </Text>
+                        </View>
+                      )}
+                      <View style={[styles.mapLocationBanner, { top: 8, left: 0, right: 0 }]}>
+                        <View style={[styles.mapLocationDot, { backgroundColor: '#22c55e' }]} />
+                        <Text style={styles.mapLocationText} numberOfLines={1}>
+                          {locationLoading
+                            ? 'Locating you…'
+                            : currentCoords
+                              ? `You are here · ${currentLocationLabel}`
+                              : 'Tap ◎ to show your location'}
+                        </Text>
+                      </View>
+                      <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 48 }]}>
+                        <View style={styles.serviceMapLegendRow}>
+                          <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
+                          <Text style={styles.serviceMapLegendText}>You</Text>
+                        </View>
+                        <View style={styles.serviceMapLegendRow}>
+                          <View
+                            style={[
+                              styles.serviceMapLegendDot,
+                              { backgroundColor: listingCatalog === 'bnb' ? '#F472B6' : '#A78BFA' },
+                            ]}
+                          />
+                          <Text style={styles.serviceMapLegendText}>
+                            {listingCatalog === 'bnb' ? 'BnB' : 'Rental'}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={[styles.mapFabColumn, { top: 48 }]}>
+                        <TouchableOpacity
+                          style={styles.mapControlButton}
+                          onPress={() => void fetchCurrentLocation()}
+                          activeOpacity={0.86}
+                        >
+                          <Text style={styles.mapControlLabel}>◎</Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  </View>
+                ) : (
                 <ScrollView
                   style={[styles.homeDeepScroll, styles.homeDeepScrollFlex]}
                   contentContainerStyle={styles.homeDeepScrollContent}
                   keyboardShouldPersistTaps="handled"
                   showsVerticalScrollIndicator={false}
                 >
-                  <Text style={styles.homeDeepPageTitle}>Listings</Text>
                   <Text style={styles.homeDeepPageLead}>Tune the catalog, open a row for the full sheet.</Text>
                   <View style={styles.valetSegmentTrack}>
                     <Pressable
@@ -6190,6 +6918,7 @@ export default function App() {
                     </Pressable>
                   ))}
                 </ScrollView>
+                )
               ) : homeDeepPage === 'listing-detail' && listingDetail && listingDetailEntity ? (
                 <ScrollView
                   ref={listingDetailScrollRef}
@@ -7527,8 +8256,12 @@ export default function App() {
   };
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: theme.canvas }]} edges={['top', 'bottom', 'left', 'right']}>
-      <View style={[styles.container, { backgroundColor: theme.canvas }, !isAuthed && styles.containerAuth]}>
+    <View style={[styles.screenRoot, { backgroundColor: theme.canvas }]}>
+      <SafeAreaView
+        style={[styles.safeArea, { backgroundColor: theme.canvas }]}
+        edges={['top', 'left', 'right']}
+      >
+        <View style={[styles.container, { backgroundColor: theme.canvas }, !isAuthed && styles.containerAuth]}>
       {renderCurrent()}
 
       <Modal
@@ -7537,13 +8270,32 @@ export default function App() {
         presentationStyle="fullScreen"
         onRequestClose={() => setGuidedJourney(null)}
       >
-        <View style={styles.journeyModalRoot}>
-          <View style={[styles.journeyModalTopBar, { paddingTop: insets.top + 8, paddingHorizontal: gutter }]}>
-            <Text style={styles.journeyModalEyebrow}>Live route</Text>
-            <Pressable style={styles.tourCloseFab} onPress={() => setGuidedJourney(null)} hitSlop={14}>
-              <Text style={styles.tourCloseFabText}>Close</Text>
+        <View style={[styles.journeyModalRoot, { backgroundColor: theme.canvas }]}>
+          <View
+            style={[
+              styles.journeyModalTopBar,
+              { paddingTop: insets.top + 8, paddingHorizontal: gutter, borderBottomColor: theme.border },
+            ]}
+          >
+            <Pressable onPress={() => setGuidedJourney(null)} hitSlop={12}>
+              <Text style={styles.homeDeepBack}>← End route</Text>
             </Pressable>
+            <Text style={[styles.journeyModalTitle, { color: theme.textPrimary }]}>Navigate</Text>
+            <View style={{ width: 72 }} />
           </View>
+          {guidedJourney ? (
+            <View style={[styles.journeyModalDestStrip, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
+              <Text style={[styles.journeyModalEyebrow, { color: BRAND.gold }]}>HEADING TO</Text>
+              <Text style={[styles.journeyModalDestTitle, { color: theme.textPrimary }]} numberOfLines={2}>
+                {guidedJourney.title}
+              </Text>
+              {guidedJourney.subtitle ? (
+                <Text style={[styles.journeyModalDestSub, { color: theme.textSecondary }]} numberOfLines={2}>
+                  {guidedJourney.subtitle}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
           {guidanceMapHtml ? (
             <WebView
               source={{ html: guidanceMapHtml }}
@@ -7591,13 +8343,17 @@ export default function App() {
         ) : null}
       </Modal>
       <StatusBar style={theme.statusBar} />
-      </View>
-    </SafeAreaView>
+        </View>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const createStyles = (theme: Theme) =>
   StyleSheet.create({
+    screenRoot: {
+      flex: 1,
+    },
     safeArea: {
       flex: 1,
       backgroundColor: theme.background,
@@ -9168,7 +9924,43 @@ const createStyles = (theme: Theme) =>
       width: 8,
       height: 8,
       borderRadius: 4,
-      backgroundColor: theme.primary,
+      backgroundColor: '#22c55e',
+    },
+    serviceMapLegend: {
+      position: 'absolute',
+      left: 16,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 7,
+      borderRadius: 999,
+      backgroundColor: theme.surface,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      zIndex: 12,
+    },
+    serviceMapLegendWrap: {
+      flexWrap: 'wrap',
+      maxWidth: '92%',
+      borderRadius: 12,
+    },
+    serviceMapLegendRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    serviceMapLegendDot: {
+      width: 10,
+      height: 10,
+      borderRadius: 5,
+      borderWidth: 2,
+      borderColor: '#fff',
+    },
+    serviceMapLegendText: {
+      fontSize: 11,
+      fontFamily: 'Inter_600SemiBold',
+      color: theme.textPrimary,
     },
     mapLocationText: {
       flex: 1,
@@ -9282,21 +10074,24 @@ const createStyles = (theme: Theme) =>
       overflow: 'hidden',
       marginBottom: 16,
       borderWidth: StyleSheet.hairlineWidth,
-      minHeight: 148,
+      minHeight: 172,
+      justifyContent: 'flex-end',
     },
-    serviceHeroImage: {
-      ...StyleSheet.absoluteFillObject,
-      width: '100%',
-      height: '100%',
+    serviceHeroImageStyle: {
+      borderRadius: 16,
     },
     serviceHeroOverlay: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: 'rgba(13, 11, 9, 0.55)',
+      backgroundColor: 'rgba(8, 7, 5, 0.52)',
+    },
+    serviceHeroGoldWash: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(201, 162, 39, 0.14)',
     },
     serviceHeroContent: {
       padding: 16,
       justifyContent: 'flex-end',
-      minHeight: 148,
+      minHeight: 172,
     },
     serviceHeroEyebrow: {
       fontSize: 10,
@@ -10008,21 +10803,41 @@ const createStyles = (theme: Theme) =>
     },
     journeyModalRoot: {
       flex: 1,
-      backgroundColor: '#020617',
     },
     journeyModalTopBar: {
       flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
-      paddingBottom: 8,
+      paddingBottom: 10,
+      borderBottomWidth: StyleSheet.hairlineWidth,
       zIndex: 2,
     },
-    journeyModalEyebrow: {
-      fontSize: 11,
+    journeyModalTitle: {
+      fontSize: 16,
       fontFamily: 'Inter_700Bold',
-      letterSpacing: 1,
-      textTransform: 'uppercase',
-      color: 'rgba(255,255,255,0.75)',
+      letterSpacing: -0.2,
+    },
+    journeyModalDestStrip: {
+      paddingHorizontal: 16,
+      paddingVertical: 12,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+    },
+    journeyModalEyebrow: {
+      fontSize: 10,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: 1.2,
+    },
+    journeyModalDestTitle: {
+      fontSize: 17,
+      fontFamily: 'Inter_700Bold',
+      marginTop: 4,
+      letterSpacing: -0.2,
+    },
+    journeyModalDestSub: {
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
+      marginTop: 2,
+      lineHeight: 17,
     },
     journeyMapWebView: {
       flex: 1,
@@ -10283,6 +11098,62 @@ const createStyles = (theme: Theme) =>
       fontSize: 15,
       fontFamily: 'Inter_600SemiBold',
       color: theme.accentBlue,
+    },
+    listingsHeaderRow: {
+      marginTop: 6,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 12,
+    },
+    listingsViewToggle: {
+      flexDirection: 'row',
+      borderRadius: 10,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      overflow: 'hidden',
+      backgroundColor: theme.mutedSurface,
+    },
+    listingsViewChip: {
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    },
+    listingsViewChipOn: {
+      backgroundColor: theme.primary,
+    },
+    listingsViewChipText: {
+      fontSize: 12,
+      fontFamily: 'Inter_600SemiBold',
+      color: theme.textSecondary,
+    },
+    listingsViewChipTextOn: {
+      color: BRAND.primaryText,
+    },
+    listingsMapShell: {
+      flex: 1,
+      minHeight: 0,
+      gap: 8,
+    },
+    listingsMapBody: {
+      flex: 1,
+      minHeight: 0,
+      borderRadius: 12,
+      overflow: 'hidden',
+      backgroundColor: theme.border,
+      position: 'relative',
+    },
+    staysHomeMapBand: {
+      width: '100%',
+      borderRadius: 12,
+      overflow: 'hidden',
+      backgroundColor: theme.border,
+      position: 'relative',
+      marginBottom: 8,
+    },
+    staysSectionActions: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
     },
     homeDeepScroll: {
       flex: 1,

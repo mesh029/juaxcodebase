@@ -103,18 +103,39 @@ export function buildUnifiedHomeServicesMapHtml(
         color: #6B7280;
         margin-top: 6px;
       }
-      .user-marker-wrap { width: 48px; height: 48px; position: relative; pointer-events: none; }
+      .user-marker-wrap {
+        width: 56px; height: 56px; position: relative; pointer-events: none; z-index: 3;
+      }
+      .user-marker-label {
+        position: absolute; left: 50%; bottom: calc(50% + 10px);
+        transform: translateX(-50%);
+        background: #16a34a; color: #fff; font-size: 10px; font-weight: 700;
+        padding: 3px 8px; border-radius: 6px; white-space: nowrap;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.22); letter-spacing: 0.02em;
+      }
       .user-pulse-ring {
         position: absolute; left: 50%; top: 50%;
-        width: 40px; height: 40px; margin-left: -20px; margin-top: -20px;
-        border-radius: 50%; border: 2px solid rgba(34,197,94,0.65);
+        width: 44px; height: 44px; margin-left: -22px; margin-top: -22px;
+        border-radius: 50%; border: 2px solid rgba(34,197,94,0.75);
         animation: juxPulse 2s ease-out infinite;
       }
       .user-dot {
-        position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin-left: -7px; margin-top: -7px;
-        border-radius: 50%; background: #22c55e; border: 2px solid #fff;
-        box-shadow: 0 1px 6px rgba(0,0,0,0.35);
+        position: absolute; left: 50%; top: 50%; width: 16px; height: 16px; margin-left: -8px; margin-top: -8px;
+        border-radius: 50%; background: #22c55e; border: 3px solid #fff;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.35);
       }
+      .jua-pop-cta {
+        display: block; width: 100%; margin-top: 10px; padding: 10px 12px;
+        border-radius: 8px; background: #C9A227; color: #111827;
+        font-size: 12px; font-weight: 700; text-align: center; cursor: pointer; border: none;
+      }
+      .jua-pop-cta-outline {
+        display: block; width: 100%; margin-top: 6px; padding: 8px 12px;
+        border-radius: 8px; background: transparent; color: #111827;
+        font-size: 12px; font-weight: 600; text-align: center; cursor: pointer;
+        border: 1px solid #E5E7EB;
+      }
+      .jua-pop-cta-outline:disabled { opacity: 0.45; cursor: not-allowed; }
       @keyframes juxPulse {
         0% { transform: scale(0.55); opacity: 0.95; }
         70% { transform: scale(1.45); opacity: 0; }
@@ -138,6 +159,31 @@ export function buildUnifiedHomeServicesMapHtml(
       let SELECTED_HIGHLIGHT = null;
       let mapReady = false;
       var pendingMode = 'laundry';
+      var userMarker = null;
+      function postMsg(obj) {
+        try {
+          if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
+            window.ReactNativeWebView.postMessage(JSON.stringify(obj));
+          }
+        } catch (_) {}
+      }
+      function setUserMarker(coords) {
+        if (!coords || typeof coords.longitude !== 'number' || typeof coords.latitude !== 'number') return;
+        DATA.current = coords;
+        var lngLat = [coords.longitude, coords.latitude];
+        if (userMarker) {
+          userMarker.setLngLat(lngLat);
+          return;
+        }
+        var el = document.createElement('div');
+        el.className = 'user-marker-wrap';
+        el.innerHTML =
+          '<div class="user-marker-label">You are here</div>' +
+          '<div class="user-pulse-ring"></div><div class="user-dot"></div>';
+        userMarker = new mapboxgl.Marker({ element: el, anchor: 'center' })
+          .setLngLat(lngLat)
+          .addTo(map);
+      }
       mapboxgl.accessToken = '${token}';
       const fallbackCenter = [36.8172, -1.2864];
       function startCenterZoom() {
@@ -170,15 +216,6 @@ export function buildUnifiedHomeServicesMapHtml(
             properties: { id: p.id, title: p.title, subtitle: p.subtitle, kind: p.kind || 'ride' },
           };
         });
-      }
-      function addPulsingUser() {
-        if (!DATA.current) return;
-        var el = document.createElement('div');
-        el.className = 'user-marker-wrap';
-        el.innerHTML = '<div class="user-pulse-ring"></div><div class="user-dot"></div>';
-        new mapboxgl.Marker({ element: el, anchor: 'center' })
-          .setLngLat([DATA.current.longitude, DATA.current.latitude])
-          .addTo(map);
       }
       function fitProximityNice() {
         var pad = DATA.viewportPad || { top: 56, bottom: 112, left: 16, right: 16 };
@@ -233,7 +270,10 @@ export function buildUnifiedHomeServicesMapHtml(
         });
       }
       function ridesActivePoints() {
-        return ridesMapFocus === 'destination' ? (BANKS.destinations || []) : (BANKS.rides || []);
+        if (ridesMapFocus === 'destination') return (BANKS.destinations || []);
+        var hubs = BANKS.rides || [];
+        var dests = BANKS.destinations || [];
+        return hubs.concat(dests);
       }
       function internalApplyMode(mode) {
         homeMode =
@@ -279,6 +319,13 @@ export function buildUnifiedHomeServicesMapHtml(
           if (mapReady) syncPickHighlight();
         } catch (_) {}
       };
+      window.juaSetUserCoords = function (coords) {
+        if (!coords) return;
+        try {
+          if (mapReady) setUserMarker(coords);
+          else DATA.current = coords;
+        } catch (_) {}
+      };
       map.on('load', function () {
         var fc = { type: 'FeatureCollection', features: featuresFromPoints(activePoints) };
         map.addSource('pins', { type: 'geojson', data: fc });
@@ -301,13 +348,42 @@ export function buildUnifiedHomeServicesMapHtml(
             'circle-stroke-color': '#ffffff',
           },
         });
-        addPulsingUser();
+        if (DATA.current) setUserMarker(DATA.current);
         mapReady = true;
         internalApplyMode(pendingMode);
         map.on('click', 'pins-circle', async function (e) {
           var f = e.features[0];
           var c = f.geometry.coordinates.slice();
           var props = f.properties || {};
+          if (homeMode === 'laundry' && String(props.kind) === 'station' && props.id) {
+            SELECTED_HIGHLIGHT = { lng: c[0], lat: c[1] };
+            syncPickHighlight();
+            postMsg({ type: 'laundryStationMapSelect', id: String(props.id) });
+          }
+          if (homeMode === 'rides' && String(props.kind) === 'ride' && props.id) {
+            SELECTED_HIGHLIGHT = { lng: c[0], lat: c[1] };
+            syncPickHighlight();
+            postMsg({ type: 'ridePickupMapSelect', id: String(props.id) });
+          }
+          if (homeMode === 'rides' && String(props.kind) === 'destination' && props.id) {
+            SELECTED_HIGHLIGHT = { lng: c[0], lat: c[1] };
+            syncPickHighlight();
+            postMsg({ type: 'rideDestinationMapSelect', id: String(props.id) });
+          }
+          if (
+            (homeMode === 'bnbs' && String(props.kind) === 'bnb') ||
+            (homeMode === 'houses' && String(props.kind) === 'house')
+          ) {
+            if (props.id) {
+              SELECTED_HIGHLIGHT = { lng: c[0], lat: c[1] };
+              syncPickHighlight();
+              postMsg({
+                type: 'listingMapSelect',
+                catalog: homeMode === 'bnbs' ? 'bnb' : 'house',
+                id: String(props.id),
+              });
+            }
+          }
           var pop = new mapboxgl.Popup({ offset: 12 }).setLngLat(c);
           var wrap = document.createElement('div');
           var h = document.createElement('div');
@@ -319,73 +395,32 @@ export function buildUnifiedHomeServicesMapHtml(
           wrap.appendChild(h);
           wrap.appendChild(s);
           if (homeMode === 'laundry' && String(props.kind) === 'station' && props.id) {
-            var note = document.createElement('div');
-            note.className = 'jua-pop-muted';
-            note.textContent =
-              'Book valet in the sheet, then drop your bag here when ready.';
-            wrap.appendChild(note);
-            var pickLaundry = document.createElement('span');
-            pickLaundry.className = 'jua-pop-link';
-            pickLaundry.style.marginTop = '8px';
-            pickLaundry.style.display = 'inline-block';
-            pickLaundry.textContent = 'Use as pickup station';
+            var pickLaundry = document.createElement('button');
+            pickLaundry.type = 'button';
+            pickLaundry.className = 'jua-pop-cta';
+            pickLaundry.textContent = 'Use this pickup station';
             pickLaundry.onclick = function () {
-              try {
-                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                  window.ReactNativeWebView.postMessage(
-                    JSON.stringify({ type: 'laundryStationPick', id: String(props.id) }),
-                  );
-                }
-              } catch (_) {}
+              postMsg({ type: 'laundryStationPick', id: String(props.id) });
             };
             wrap.appendChild(pickLaundry);
-            var valetL = document.createElement('span');
-            valetL.className = 'jua-pop-link';
-            valetL.style.marginTop = '6px';
-            valetL.style.display = 'inline-block';
-            valetL.textContent = 'Open valet sheet';
-            valetL.onclick = function () {
-              try {
-                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                  window.ReactNativeWebView.postMessage(
-                    JSON.stringify({ type: 'openValetFromStation', id: String(props.id) }),
-                  );
-                }
-              } catch (_) {}
-            };
-            wrap.appendChild(valetL);
           }
           if (homeMode === 'rides' && String(props.kind) === 'ride' && props.id) {
-            var ridePick = document.createElement('span');
-            ridePick.className = 'jua-pop-link';
-            ridePick.style.marginTop = '8px';
-            ridePick.style.display = 'inline-block';
-            ridePick.textContent = 'Use as pickup hub';
+            var ridePick = document.createElement('button');
+            ridePick.type = 'button';
+            ridePick.className = 'jua-pop-cta';
+            ridePick.textContent = 'Use this pickup hub';
             ridePick.onclick = function () {
-              try {
-                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                  window.ReactNativeWebView.postMessage(
-                    JSON.stringify({ type: 'ridePickupHub', id: String(props.id) }),
-                  );
-                }
-              } catch (_) {}
+              postMsg({ type: 'ridePickupHub', id: String(props.id) });
             };
             wrap.appendChild(ridePick);
           }
           if (homeMode === 'rides' && String(props.kind) === 'destination' && props.id) {
-            var rideDest = document.createElement('span');
-            rideDest.className = 'jua-pop-link';
-            rideDest.style.marginTop = '8px';
-            rideDest.style.display = 'inline-block';
-            rideDest.textContent = 'Use as destination';
+            var rideDest = document.createElement('button');
+            rideDest.type = 'button';
+            rideDest.className = 'jua-pop-cta';
+            rideDest.textContent = 'Use this destination';
             rideDest.onclick = function () {
-              try {
-                if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                  window.ReactNativeWebView.postMessage(
-                    JSON.stringify({ type: 'rideDestination', id: String(props.id) }),
-                  );
-                }
-              } catch (_) {}
+              postMsg({ type: 'rideDestination', id: String(props.id) });
             };
             wrap.appendChild(rideDest);
           }
@@ -394,53 +429,38 @@ export function buildUnifiedHomeServicesMapHtml(
             (homeMode === 'houses' && String(props.kind) === 'house')
           ) {
             if (props.id) {
-              var rowList = document.createElement('div');
-              rowList.className = 'jua-pop-actions';
-              rowList.style.borderTop = '0';
-              rowList.style.marginTop = '8px';
-              rowList.style.paddingTop = '0';
-              var prevListing = document.createElement('span');
-              prevListing.className = 'jua-pop-link';
-              prevListing.textContent = 'Preview';
-              prevListing.onclick = function () {
-                try {
-                  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                    window.ReactNativeWebView.postMessage(
-                      JSON.stringify({
-                        type: 'previewListing',
-                        catalog: homeMode === 'bnbs' ? 'bnb' : 'house',
-                        id: String(props.id),
-                      }),
-                    );
-                  }
-                } catch (_) {}
+              var catalog = homeMode === 'bnbs' ? 'bnb' : 'house';
+              var viewListing = document.createElement('button');
+              viewListing.type = 'button';
+              viewListing.className = 'jua-pop-cta';
+              viewListing.textContent = 'View listing details';
+              viewListing.onclick = function () {
+                postMsg({ type: 'openListingDetail', catalog: catalog, id: String(props.id) });
               };
-              var midListing = document.createElement('span');
-              midListing.textContent = '·';
-              midListing.style.color = '#9CA3AF';
-              midListing.style.fontWeight = '500';
-              var det = document.createElement('span');
-              det.className = 'jua-pop-link';
-              det.textContent = 'Open listing';
-              det.onclick = function () {
-                try {
-                  if (window.ReactNativeWebView && window.ReactNativeWebView.postMessage) {
-                    window.ReactNativeWebView.postMessage(
-                      JSON.stringify({
-                        type: 'openListingDetail',
-                        catalog: homeMode === 'bnbs' ? 'bnb' : 'house',
-                        id: String(props.id),
-                      }),
-                    );
-                  }
-                } catch (_) {}
+              wrap.appendChild(viewListing);
+              var navListing = document.createElement('button');
+              navListing.type = 'button';
+              navListing.className = 'jua-pop-cta-outline';
+              navListing.textContent = DATA.current ? 'Navigate' : 'Enable location to navigate';
+              navListing.disabled = !DATA.current;
+              navListing.onclick = function () {
+                if (!DATA.current) return;
+                postMsg({
+                  type: 'startJourney',
+                  destLng: c[0],
+                  destLat: c[1],
+                  title: String(props.title || 'Listing'),
+                  subtitle: String(props.subtitle || ''),
+                  kind: catalog,
+                });
               };
-              rowList.appendChild(prevListing);
-              rowList.appendChild(midListing);
-              rowList.appendChild(det);
-              wrap.appendChild(rowList);
+              wrap.appendChild(navListing);
             }
           }
+          var isListingPin =
+            (homeMode === 'bnbs' && String(props.kind) === 'bnb') ||
+            (homeMode === 'houses' && String(props.kind) === 'house');
+          if (!isListingPin) {
           var row = document.createElement('div');
           row.className = 'jua-pop-actions';
           var navL = document.createElement('span');
@@ -507,6 +527,7 @@ export function buildUnifiedHomeServicesMapHtml(
           row.appendChild(mid);
           row.appendChild(prevL);
           wrap.appendChild(row);
+          }
           pop.setDOMContent(wrap).addTo(map);
         });
         map.on('mouseenter', 'pins-circle', function () {
@@ -517,6 +538,11 @@ export function buildUnifiedHomeServicesMapHtml(
         });
         if (window.juaInstallMapInteraction) {
           window.juaInstallMapInteraction(map, DATA.current);
+          var interactionSetUser = window.juaSetUserCoords;
+          window.juaSetUserCoords = function (coords) {
+            setUserMarker(coords);
+            if (interactionSetUser) interactionSetUser(coords);
+          };
         }
       });
     </script>
