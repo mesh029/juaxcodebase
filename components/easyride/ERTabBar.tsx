@@ -7,30 +7,38 @@ type Props<T extends string> = {
   tabs: ERTabItem<T>[];
   active: T;
   onChange: (key: T) => void;
-  bottomPad: number;
+  /** Safe-area bottom inset — applied as padding inside the bar (same bg color). */
+  bottomInset: number;
   horizontalPad: number;
   darkMode?: boolean;
 };
 
+/**
+ * Bottom tab bar — matches Figma Make TabBar.tsx:
+ * canvas / primaryFaint background (NOT white sheet), border-top only.
+ * Bottom inset is padding on this same container so there is no two-tone strip.
+ */
 export function ERTabBar<T extends string>({
   tabs,
   active,
   onChange,
-  bottomPad,
+  bottomInset,
   horizontalPad,
   darkMode = false,
 }: Props<T>) {
   const idle = darkMode ? BRAND.dark.tabIdle : BRAND.light.tabIdle;
+  const barBg = darkMode ? BRAND.dark.canvas : BRAND.light.canvas;
+  const border = darkMode ? BRAND.dark.border : BRAND.light.border;
 
   return (
     <View
       style={[
-        styles.shell,
+        styles.root,
         {
-          paddingBottom: bottomPad,
+          backgroundColor: barBg,
+          borderTopColor: border,
+          paddingBottom: bottomInset,
           paddingHorizontal: horizontalPad,
-          backgroundColor: darkMode ? BRAND.dark.sheet : BRAND.light.sheet,
-          borderTopColor: darkMode ? BRAND.dark.border : BRAND.light.border,
         },
       ]}
     >
@@ -52,10 +60,10 @@ export function ERTabBar<T extends string>({
 }
 
 const styles = StyleSheet.create({
-  shell: {
+  root: {
+    flexShrink: 0,
     borderTopWidth: StyleSheet.hairlineWidth,
     paddingTop: 12,
-    flexShrink: 0,
   },
   row: {
     flexDirection: 'row',
@@ -66,6 +74,7 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+    minHeight: 44,
     paddingVertical: 4,
     paddingHorizontal: 16,
     gap: 2,

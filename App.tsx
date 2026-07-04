@@ -1,5 +1,4 @@
 import { StatusBar } from 'expo-status-bar';
-import * as NavigationBar from 'expo-navigation-bar';
 import { Fragment, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import {
@@ -28,12 +27,14 @@ import {
   useColorScheme,
   type ViewStyle,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
+import { useChromeInsets } from './hooks/useChromeInsets';
 import { buildUnifiedHomeServicesMapHtml, type HomeUnifiedBanks, type HomeUnifiedPin } from './homeUnifiedMapHtml';
-import { AuthScreen } from './AuthScreen';
+import { OnboardingFlow } from './components/onboarding/OnboardingFlow';
 import { BRAND } from './theme/brand';
+import { Colors } from './theme/colors';
 import { ERServiceSegment, type ServiceSegmentItem } from './components/easyride/ERServiceSegment';
 import { ERTabBar } from './components/easyride/ERTabBar';
 import { ERSearchField } from './components/easyride/ERSearchField';
@@ -67,7 +68,6 @@ type HomeDeepPage = null | 'listings' | 'listing-detail' | 'valet-studio' | 'rid
 type ListingCatalog = 'bnb' | 'house';
 type StaySpaceFilter = 'any' | 'entire' | 'room';
 
-type Screen = 'splash' | 'signin';
 type MainTab = 'home' | 'trips' | 'profile';
 type StaysSubTab = 'bnb' | 'rental';
 
@@ -800,43 +800,43 @@ const buildGuidanceMapHtml = (
 };
 
 const LIGHT_THEME: Theme = {
-  background: BRAND.light.canvas,
-  canvas: BRAND.light.canvas,
-  surface: BRAND.light.surface,
-  sheet: BRAND.light.sheet,
-  border: BRAND.light.border,
-  textPrimary: BRAND.light.text,
-  textSecondary: BRAND.light.textSecondary,
-  textMuted: BRAND.light.textMuted,
-  accent: BRAND.light.text,
-  accentText: '#FFFFFF',
-  primary: BRAND.primary,
-  primaryLight: BRAND.primaryLight,
-  accentBlue: BRAND.gold,
-  mutedSurface: BRAND.light.muted,
-  tabIdle: BRAND.light.tabIdle,
-  statusBar: 'dark',
-  mapStyleId: 'light-v11',
+  background: Colors.light.canvas,
+  canvas: Colors.light.canvas,
+  surface: Colors.light.surface,
+  sheet: Colors.light.sheet,
+  border: Colors.light.border,
+  textPrimary: Colors.light.text,
+  textSecondary: Colors.light.textSecondary,
+  textMuted: Colors.light.textMuted,
+  accent: Colors.light.text,
+  accentText: Colors.light.ctaText,
+  primary: Colors.light.primary,
+  primaryLight: Colors.light.primaryLight,
+  accentBlue: Colors.light.primary,
+  mutedSurface: Colors.light.surface,
+  tabIdle: Colors.light.tabIdle,
+  statusBar: Colors.light.statusBar,
+  mapStyleId: Colors.light.mapStyleId,
 };
 
 const DARK_THEME: Theme = {
-  background: BRAND.dark.canvas,
-  canvas: BRAND.dark.canvas,
-  surface: BRAND.dark.surface,
-  sheet: BRAND.dark.sheet,
-  border: BRAND.dark.border,
-  textPrimary: BRAND.dark.text,
-  textSecondary: BRAND.dark.textSecondary,
-  textMuted: BRAND.dark.textMuted,
-  accent: '#FFFFFF',
-  accentText: '#111111',
-  primary: BRAND.primary,
-  primaryLight: '#2C2C2C',
-  accentBlue: BRAND.gold,
-  mutedSurface: BRAND.dark.muted,
-  tabIdle: BRAND.dark.tabIdle,
-  statusBar: 'light',
-  mapStyleId: 'dark-v11',
+  background: Colors.dark.canvas,
+  canvas: Colors.dark.canvas,
+  surface: Colors.dark.surface,
+  sheet: Colors.dark.sheet,
+  border: Colors.dark.border,
+  textPrimary: Colors.dark.text,
+  textSecondary: Colors.dark.textSecondary,
+  textMuted: Colors.dark.textMuted,
+  accent: Colors.dark.text,
+  accentText: Colors.dark.ctaText,
+  primary: Colors.dark.primary,
+  primaryLight: Colors.dark.primaryLight,
+  accentBlue: Colors.dark.primary,
+  mutedSurface: Colors.dark.surface,
+  tabIdle: Colors.dark.tabIdle,
+  statusBar: Colors.dark.statusBar,
+  mapStyleId: Colors.dark.mapStyleId,
 };
 
 /** Remote hero shots — section-relevant, cacheable Unsplash URLs. */
@@ -2052,7 +2052,6 @@ export default function App() {
     Inter_600SemiBold,
     Inter_700Bold,
   });
-  const [screen, setScreen] = useState<Screen>('splash');
   const [isAuthed, setIsAuthed] = useState(false);
   const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [activeService, setActiveService] = useState<ServiceType>('laundry');
@@ -2151,7 +2150,11 @@ export default function App() {
   const [rideWizardStep, setRideWizardStep] = useState<RideWizardStep>('pickup');
   const [laundryWizardStep, setLaundryWizardStep] = useState<FuaWizardStep>('pickup');
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
-  const insets = useSafeAreaInsets();
+  const theme = themeMode === 'light' ? LIGHT_THEME : DARK_THEME;
+  const { insets, bottomInset } = useChromeInsets({
+    backgroundColor: theme.canvas,
+    isDark: themeMode === 'dark',
+  });
 
   const pickupDisplayLabel = useMemo(() => {
     if (!draftPickupCoords) return currentLocationLabel;
@@ -2167,26 +2170,16 @@ export default function App() {
     return pickupDisplayLabel;
   }, [ridePickupMode, ridePickupStationId, pickupDisplayLabel]);
 
-  const theme = themeMode === 'light' ? LIGHT_THEME : DARK_THEME;
   const styles = useMemo(() => createStyles(theme), [theme]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     RNStatusBar.setBackgroundColor(theme.background, true);
     RNStatusBar.setBarStyle(themeMode === 'dark' ? 'light-content' : 'dark-content');
-    void (async () => {
-      try {
-        await NavigationBar.setPositionAsync('absolute');
-        await NavigationBar.setBackgroundColorAsync(theme.background);
-        await NavigationBar.setButtonStyleAsync(themeMode === 'dark' ? 'light' : 'dark');
-      } catch {
-        /* navigation bar API unavailable on some builds */
-      }
-    })();
   }, [theme.background, themeMode]);
   const gutter = Math.min(24, Math.max(14, Math.round(windowWidth * 0.042)));
   const tabBarInnerHeight = 56;
-  const tabBarBottomPad = Math.max(insets.bottom + 10, Platform.OS === 'android' ? 18 : 22);
+  const tabBarBottomPad = bottomInset;
   const tabBarTotalHeight = tabBarInnerHeight + tabBarBottomPad;
   const floatingNavHeight = tabBarTotalHeight;
   const onHomeTab = activeTab === 'home';
@@ -3426,11 +3419,7 @@ export default function App() {
       return true;
     }
     if (!isAuthed) {
-      if (screen === 'signin') {
-        setScreen('splash');
-        return true;
-      }
-      return true;
+      return false;
     }
     if (homeDeepPage === 'listing-detail') {
       setHomeDeepPage('listings');
@@ -3467,7 +3456,6 @@ export default function App() {
     tourSheetTarget,
     guidedJourney,
     isAuthed,
-    screen,
     homeDeepPage,
     homeSheetStage,
     activeTab,
@@ -4536,24 +4524,9 @@ export default function App() {
         ? 'Dark'
         : 'Light';
 
-  const renderSplash = () => (
-    <View style={[styles.splashWrap, { backgroundColor: theme.canvas }]}>
-      <View style={styles.logoBox}>
-        <Text style={styles.logoGlyph}>J</Text>
-      </View>
-      <Text style={[styles.splashTitle, { color: theme.textPrimary }]}>Jua X</Text>
-      <Text style={[styles.splashSub, { color: theme.textSecondary }]}>FUA · SAKA KEJA · RIDES</Text>
-      <TouchableOpacity style={styles.splashButton} onPress={() => setScreen('signin')} activeOpacity={0.9}>
-        <Text style={styles.splashButtonLabel}>Get started</Text>
-      </TouchableOpacity>
-    </View>
-  );
-
-  const renderSignIn = () => (
-    <AuthScreen
-      darkMode={themeMode === 'dark'}
+  const renderOnboarding = () => (
+    <OnboardingFlow
       onComplete={() => {
-        // Land on home without layout animation — avoids iOS crashes during auth → home transition.
         setIsAuthed(true);
         setActiveTab('home');
         setHomeSheetStage('mid');
@@ -6508,7 +6481,7 @@ export default function App() {
               setActiveTab(key);
               if (key === 'home') setHomeSheetStageAnimated('mid');
             }}
-            bottomPad={tabBarBottomPad}
+            bottomInset={tabBarBottomPad}
             horizontalPad={gutter}
             darkMode={themeMode === 'dark'}
           />
@@ -8247,21 +8220,20 @@ export default function App() {
   );
 
   const renderCurrent = () => {
-    if (!isAuthed) {
-      if (screen === 'splash') return renderSplash();
-      return renderSignIn();
-    }
+    if (!isAuthed) return renderOnboarding();
     if (activeTab === 'home' || activeTab === 'trips' || activeTab === 'profile') return renderHome();
     return renderHome();
   };
 
   return (
     <View style={[styles.screenRoot, { backgroundColor: theme.canvas }]}>
-      <SafeAreaView
-        style={[styles.safeArea, { backgroundColor: theme.canvas }]}
-        edges={['top', 'left', 'right']}
+      <View
+        style={[
+          styles.container,
+          { backgroundColor: theme.canvas, paddingTop: insets.top },
+          !isAuthed && styles.containerAuth,
+        ]}
       >
-        <View style={[styles.container, { backgroundColor: theme.canvas }, !isAuthed && styles.containerAuth]}>
       {renderCurrent()}
 
       <Modal
@@ -8343,8 +8315,7 @@ export default function App() {
         ) : null}
       </Modal>
       <StatusBar style={theme.statusBar} />
-        </View>
-      </SafeAreaView>
+      </View>
     </View>
   );
 }
