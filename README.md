@@ -2,7 +2,7 @@
 
 **Jua X** is a Kenya-focused super-app prototype that combines rides, laundry valet (Jua Fua), short-term stays (BNBs), long-term rentals, and city discovery in one mobile experience. The tagline on the splash screen is *"Powered by Jua Fua laundry and city services."*
 
-This repository is a **working UI prototype**, not a production app. Booking, auth, messaging, and listings are largely client-side demos. The only live external integration today is **Mapbox** (maps, geocoding, routing).
+This repository is a **working UI prototype** moving toward production via the Next.js API in [`../backend`](../backend). Backend phases & KPIs: [`../backend/docs/ROADMAP.md`](../backend/docs/ROADMAP.md).
 
 ---
 

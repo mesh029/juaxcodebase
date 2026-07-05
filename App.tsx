@@ -1,4 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
+import { AppIcon, type AppIconName } from './components/ui/AppIcon';
 import { Fragment, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import {
@@ -14,6 +15,7 @@ import {
   Pressable,
   Platform,
   PanResponder,
+  RefreshControl,
   UIManager,
   StatusBar as RNStatusBar,
   ScrollView,
@@ -25,12 +27,18 @@ import {
   View,
   useWindowDimensions,
   useColorScheme,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   type ViewStyle,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Location from 'expo-location';
 import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-native-webview';
 import { useChromeInsets } from './hooks/useChromeInsets';
+import { toSwipeableSegment, useServiceSwipePan, type SwipeableSegment } from './hooks/useServiceSwipe';
+import { ServiceSwipeProvider } from './context/ServiceSwipeContext';
+import { CarouselZone } from './components/chrome/CarouselZone';
+import { HomeHub } from './components/home/HomeHub';
 import { buildUnifiedHomeServicesMapHtml, type HomeUnifiedBanks, type HomeUnifiedPin } from './homeUnifiedMapHtml';
 import { OnboardingFlow } from './components/onboarding/OnboardingFlow';
 import { BRAND } from './theme/brand';
@@ -48,6 +56,10 @@ import {
   SERVICE_DOT_COLORS,
 } from './components/make/shared';
 import { MAP_INTERACTION_HTML, MAP_INTERACTION_JS, MAP_INTERACTION_STYLES } from './mapInteractionScript';
+import { useAuth } from './context/AuthContext';
+import { useAppData } from './hooks/useAppData';
+import { createLaundryOrder, estimateLaundryOrder, fetchLaundryOrders, submitFeedback } from './lib/api';
+import type { LaundryOrder, ListingRequest, ListingRequestKind } from './lib/api-types';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -72,6 +84,7 @@ type MainTab = 'home' | 'trips' | 'profile';
 type StaysSubTab = 'bnb' | 'rental';
 
 const FEATURED_STAYS_HOME = 5;
+const PULL_REFRESH_THRESHOLD = 64;
 
 const MAIN_TAB_CONFIG: { key: MainTab; label: string; icon: string }[] = [
   { key: 'home', label: 'Home', icon: '⌂' },
@@ -103,7 +116,7 @@ type Destination = {
   exploreTip?: string;
 };
 type Suggestion = { id: string; name: string; subtitle: string; coords: Coordinates };
-type RideOption = { id: string; label: string; minutes: number; multiplier: number; icon: string; seats: number; blurb: string };
+type RideOption = { id: string; label: string; minutes: number; multiplier: number; icon: AppIconName; seats: number; blurb: string };
 type ServiceType = 'rides' | 'bnbs' | 'laundry' | 'houses';
 type TripPhase = 'idle' | 'selecting' | 'route_preview' | 'confirmed' | 'active_trip';
 type CountyKey = 'nairobi' | 'mombasa' | 'kisumu' | 'nyamira';
@@ -149,6 +162,7 @@ type HouseListing = {
   baths: number;
   amenities: string[];
   has3dTour: boolean;
+  locationLocked?: boolean;
 };
 type BnbListing = {
   id: string;
@@ -166,6 +180,7 @@ type BnbListing = {
   guests: number;
   amenities: string[];
   has3dTour: boolean;
+  locationLocked?: boolean;
 };
 /** Curated city spots on Explore (hotels, meetups, retail — demo insight numbers). */
 type ExploreVenueCategory = 'hotel' | 'meetup' | 'fashion' | 'market' | 'culture';
@@ -252,6 +267,7 @@ type Theme = {
   accentBlue: string;
   mutedSurface: string;
   tabIdle: string;
+  grabber: string;
   statusBar: 'light' | 'dark';
   mapStyleId: string;
 };
@@ -812,9 +828,10 @@ const LIGHT_THEME: Theme = {
   accentText: Colors.light.ctaText,
   primary: Colors.light.primary,
   primaryLight: Colors.light.primaryLight,
-  accentBlue: Colors.light.primary,
-  mutedSurface: Colors.light.surface,
+  accentBlue: Colors.light.accent,
+  mutedSurface: Colors.light.primaryFaint,
   tabIdle: Colors.light.tabIdle,
+  grabber: Colors.light.grabber,
   statusBar: Colors.light.statusBar,
   mapStyleId: Colors.light.mapStyleId,
 };
@@ -832,9 +849,10 @@ const DARK_THEME: Theme = {
   accentText: Colors.dark.ctaText,
   primary: Colors.dark.primary,
   primaryLight: Colors.dark.primaryLight,
-  accentBlue: Colors.dark.primary,
-  mutedSurface: Colors.dark.surface,
+  accentBlue: Colors.dark.accent,
+  mutedSurface: Colors.dark.primaryFaint,
   tabIdle: Colors.dark.tabIdle,
+  grabber: Colors.dark.grabber,
   statusBar: Colors.dark.statusBar,
   mapStyleId: Colors.dark.mapStyleId,
 };
@@ -1306,9 +1324,9 @@ const explorePinHeat = (seed: string, min: number, max: number) => {
 };
 
 const RIDE_OPTIONS: RideOption[] = [
-  { id: 'economy', label: 'Jua Ride', minutes: 3, multiplier: 1, icon: '🚗', seats: 4, blurb: 'Everyday trips · best value' },
-  { id: 'comfort', label: 'Jua Comfort', minutes: 5, multiplier: 1.35, icon: '🚙', seats: 4, blurb: 'Extra legroom · quiet AC' },
-  { id: 'premium', label: 'Jua XL', minutes: 7, multiplier: 1.85, icon: '🚐', seats: 6, blurb: 'Groups · luggage · airport runs' },
+  { id: 'economy', label: 'Jua Ride', minutes: 3, multiplier: 1, icon: 'rides', seats: 4, blurb: 'Everyday trips · best value' },
+  { id: 'comfort', label: 'Jua Comfort', minutes: 5, multiplier: 1.35, icon: 'rides-comfort', seats: 4, blurb: 'Extra legroom · quiet AC' },
+  { id: 'premium', label: 'Jua XL', minutes: 7, multiplier: 1.85, icon: 'rides-xl', seats: 6, blurb: 'Groups · luggage · airport runs' },
 ];
 
 const RIDE_WIZARD_BOOKING = [
@@ -1349,14 +1367,15 @@ const isRideBookingWizardStep = (step: RideWizardStep): step is RideWizardBookin
   (RIDE_WIZARD_BOOKING_ORDER as readonly string[]).includes(step);
 
 const FUA_WIZARD_BOOKING = [
-  { key: 'pickup', title: 'Pickup point', subtitle: 'Door pickup or drop at a verified station', icon: '📍' },
-  { key: 'load', title: 'Your load', subtitle: 'How much laundry are we collecting?', icon: '👕' },
-  { key: 'review', title: 'Review & confirm', subtitle: 'Check details before we dispatch mama fua', icon: '✓' },
+  { key: 'pickup', title: 'Wash & fold', subtitle: 'Door pickup or drop at a verified hub', icon: 'location' as const },
+  { key: 'load', title: 'Your load', subtitle: 'How much laundry are we collecting?', icon: 'laundry' as const },
+  { key: 'review', title: 'Review & confirm', subtitle: 'Check details before we dispatch', icon: 'checkmark' as const },
 ] as const;
 
 const FUA_WIZARD_BOOKING_ORDER = FUA_WIZARD_BOOKING.map((s) => s.key);
 
 type FuaWizardStep = (typeof FUA_WIZARD_BOOKING)[number]['key'];
+type LaundryPickupMode = 'door' | 'station' | 'mamafua';
 
 const nextFuaWizardStep = (step: FuaWizardStep): FuaWizardStep => {
   const i = FUA_WIZARD_BOOKING_ORDER.indexOf(step);
@@ -1371,7 +1390,55 @@ const prevFuaWizardStep = (step: FuaWizardStep): FuaWizardStep | null => {
   return i > 0 ? FUA_WIZARD_BOOKING_ORDER[i - 1] : null;
 };
 
-const PICKUP_STATIONS: PlaceStation[] = [
+function fuaStepCopy(mode: LaundryPickupMode, step: FuaWizardStep): { title: string; subtitle: string } {
+  if (mode === 'mamafua') {
+    if (step === 'pickup') {
+      return {
+        title: 'Your home',
+        subtitle: 'A rider drops off Mama Fua with bucket, mop & supplies — she works at your place',
+      };
+    }
+    if (step === 'load') {
+      return {
+        title: 'What should they do?',
+        subtitle: 'Tick the jobs you need — floors, utensils, laundry, deep clean, etc.',
+      };
+    }
+    return {
+      title: 'Confirm visit',
+      subtitle: 'Rider + Mama Fua head to your address at the time you picked',
+    };
+  }
+  if (step === 'pickup') {
+    return {
+      title: 'Wash & fold',
+      subtitle: 'Door pickup by default — or pick a drop-off hub on the map',
+    };
+  }
+  const meta = FUA_WIZARD_BOOKING.find((s) => s.key === step);
+  return meta
+    ? { title: meta.title, subtitle: meta.subtitle }
+    : { title: 'Review', subtitle: 'Check details before we dispatch' };
+}
+
+function scheduleBandLabel(
+  band: string,
+  options: { id: string; shortLabel: string }[],
+): string {
+  return options.find((b) => b.id === band)?.shortLabel ?? band;
+}
+
+const DEFAULT_MAMAFUA_WHEN: { id: 'asap' | 'morning' | 'afternoon' | 'evening'; label: string; shortLabel: string }[] = [
+  { id: 'asap', label: 'Flexible', shortLabel: 'Flexible · today' },
+  { id: 'morning', label: 'Morning', shortLabel: 'Morning (8–12)' },
+  { id: 'evening', label: 'Evening', shortLabel: 'Evening (4–8)' },
+];
+
+function fuaWhenLabel(when: string, options = DEFAULT_MAMAFUA_WHEN): string {
+  return scheduleBandLabel(when, options);
+}
+
+const FALLBACK_PICKUP_STATIONS: PlaceStation[] = [
   {
     id: 'nbo-1',
     name: 'Westlands Hub',
@@ -1418,11 +1485,14 @@ const PICKUP_STATIONS: PlaceStation[] = [
 
 const PICKUP_RADIUS_KM = 28;
 
-type ComingSoonServiceId = 'cloth_shop' | 'groceries' | 'tours' | 'spots' | 'events';
+type ComingSoonServiceId = 'rides' | 'cloth_shop' | 'groceries' | 'tours' | 'spots' | 'events';
 
-type ServiceSegmentId = ServiceType | ComingSoonServiceId;
+type HomeSegmentId = 'home';
+
+type ServiceSegmentId = ServiceType | ComingSoonServiceId | HomeSegmentId;
 
 const COMING_SOON_SEGMENT_IDS: ComingSoonServiceId[] = [
+  'rides',
   'cloth_shop',
   'groceries',
   'tours',
@@ -1434,22 +1504,34 @@ const isComingSoonService = (seg: ServiceSegmentId): seg is ComingSoonServiceId 
   (COMING_SOON_SEGMENT_IDS as readonly string[]).includes(seg);
 
 const SERVICE_SEGMENTS: ServiceSegmentItem<ServiceSegmentId>[] = [
+  { key: 'home', label: 'HOME' },
   { key: 'laundry', label: 'FUA' },
   { key: 'bnbs', label: 'SAKA KEJA' },
-  { key: 'rides', label: 'RIDES' },
-  { key: 'tours', label: 'TOURS', comingSoon: true, soonEmoji: '🗺️' },
-  { key: 'spots', label: 'SPOTS', comingSoon: true, soonEmoji: '✨' },
-  { key: 'events', label: 'EVENTS', comingSoon: true, soonEmoji: '🎉' },
-  { key: 'cloth_shop', label: 'CLOTH', comingSoon: true, soonEmoji: '👗' },
-  { key: 'groceries', label: 'GROCERY', comingSoon: true, soonEmoji: '🛒' },
+  { key: 'rides', label: 'RIDES', comingSoon: true },
+  { key: 'tours', label: 'TOURS', comingSoon: true },
+  { key: 'spots', label: 'SPOTS', comingSoon: true },
+  { key: 'events', label: 'EVENTS', comingSoon: true },
+  { key: 'cloth_shop', label: 'CLOTH', comingSoon: true },
+  { key: 'groceries', label: 'GROCERY', comingSoon: true },
 ];
 
 const COMING_SOON_SERVICE_INFO: Record<
   ComingSoonServiceId,
-  { emoji: string; title: string; lead: string; features: string[]; hero: keyof typeof IMG }
+  { eyebrow: string; title: string; lead: string; features: string[]; hero: keyof typeof IMG }
 > = {
+  rides: {
+    eyebrow: 'RIDES',
+    title: 'Jua Rides',
+    lead: 'City rides with upfront KES pricing, pickup at your pin or a hub, and M-Pesa when we launch.',
+    features: [
+      'Economy, comfort, and XL tiers for everyday trips',
+      'Pickup at your location or a verified hub',
+      'M-Pesa pay · trip history in Trips & orders',
+    ],
+    hero: 'ridesHero',
+  },
   cloth_shop: {
-    emoji: '👗',
+    eyebrow: 'CLOTH',
     title: 'Jua Cloth',
     lead: 'Fashion and essentials from local vendors — mitumba finds, market stalls, and trusted tailors in one tap.',
     features: [
@@ -1460,7 +1542,7 @@ const COMING_SOON_SERVICE_INFO: Record<
     hero: 'clothHero',
   },
   groceries: {
-    emoji: '🛒',
+    eyebrow: 'GROCERY',
     title: 'Jua Grocery',
     lead: 'Market runs without the queue — dukas, greens, and household staples brought to your door.',
     features: [
@@ -1471,7 +1553,7 @@ const COMING_SOON_SERVICE_INFO: Record<
     hero: 'groceryHero',
   },
   tours: {
-    emoji: '🗺️',
+    eyebrow: 'TOURS',
     title: 'Jua Tours',
     lead: 'Request guided city tours — culture, food, nightlife, and hidden gems with a local host.',
     features: [
@@ -1482,7 +1564,7 @@ const COMING_SOON_SERVICE_INFO: Record<
     hero: 'toursHero',
   },
   spots: {
-    emoji: '✨',
+    eyebrow: 'SPOTS',
     title: 'Jua Spots',
     lead: 'The best places in town — hotels, rooftops, cafés, and photo-worthy corners picked for you.',
     features: [
@@ -1493,7 +1575,7 @@ const COMING_SOON_SERVICE_INFO: Record<
     hero: 'spotsHero',
   },
   events: {
-    emoji: '🎉',
+    eyebrow: 'EVENTS',
     title: 'Jua Events',
     lead: 'What’s on this week — concerts, markets, meetups, and county showcases in one feed.',
     features: [
@@ -1630,12 +1712,27 @@ const STAYS_RENTAL_HERO_SLIDES: IntroHeroSlide[] = [
   },
 ];
 
+/** Home hub carousel — highlights across services (carousels live on Home only). */
+const HOME_HERO_SLIDES: IntroHeroSlide[] = [
+  {
+    id: 'home-welcome',
+    eyebrow: 'JUA X',
+    title: 'Everything nearby, one app',
+    description: 'Laundry, stays, and rides from your pin — track it all under Trips.',
+    image: IMG.lake,
+    workAreas: ['Fua', 'Keja', 'Rides'],
+  },
+  FUA_HERO_SLIDES[0],
+  STAYS_BNB_HERO_SLIDES[0],
+  RIDES_HERO_SLIDES[0],
+];
+
 const comingSoonHeroSlides = (seg: ComingSoonServiceId): IntroHeroSlide[] => {
   const info = COMING_SOON_SERVICE_INFO[seg];
   return [
     {
       id: `${seg}-overview`,
-      eyebrow: info.emoji,
+      eyebrow: info.eyebrow,
       title: info.title,
       description: info.lead,
       image: IMG[info.hero],
@@ -1646,7 +1743,7 @@ const comingSoonHeroSlides = (seg: ComingSoonServiceId): IntroHeroSlide[] => {
       id: `${seg}-soon`,
       eyebrow: 'ON THE WAY',
       title: 'Launching on Jua X',
-      description: 'We are piloting Fua, Saka Keja, and Rides first — this service joins the same app and wallet.',
+      description: 'We are piloting Fua and Saka Keja first — more services join the same app and wallet.',
       image: IMG.nairobiCity,
       workAreas: ['Same account', 'M-Pesa ready', 'Notify at launch'],
       comingSoon: true,
@@ -1657,7 +1754,7 @@ const comingSoonHeroSlides = (seg: ComingSoonServiceId): IntroHeroSlide[] => {
 const STAYS_RADIUS_OPTIONS = [2, 5, 10] as const;
 const HOUSE_RADIUS_OPTIONS = [2, 5, 10, 15, 25] as const;
 
-const HOUSE_LISTINGS: HouseListing[] = [
+const FALLBACK_HOUSE_LISTINGS: HouseListing[] = [
   {
     id: 'h1',
     title: '2BR Apartment - Kilimani',
@@ -1840,7 +1937,7 @@ const HOUSE_LISTINGS: HouseListing[] = [
   },
 ];
 
-const BNB_LISTINGS: BnbListing[] = [
+const FALLBACK_BNB_LISTINGS: BnbListing[] = [
   {
     id: 'b1',
     title: 'Westlands Studio Loft',
@@ -2052,10 +2149,23 @@ export default function App() {
     Inter_600SemiBold,
     Inter_700Bold,
   });
-  const [isAuthed, setIsAuthed] = useState(false);
+  const { isAuthed, user, profile, loading: authLoading, signOut, refreshProfile } = useAuth();
+  const {
+    houseListings,
+    bnbListings,
+    pickupStations,
+    mamaFuaTasks,
+    mamaFuaDispatchFee,
+    mamaFuaConvenienceTimes,
+    subscriptionPlans,
+    dataLoading,
+    listingsLoaded,
+    dataError,
+    refreshAppData,
+  } = useAppData();
   const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [activeService, setActiveService] = useState<ServiceType>('laundry');
-  const [activeSegment, setActiveSegment] = useState<ServiceSegmentId>('laundry');
+  const [activeSegment, setActiveSegment] = useState<ServiceSegmentId>('home');
   const [staysSubTab, setStaysSubTab] = useState<StaysSubTab>('bnb');
   const [staysRadiusKm, setStaysRadiusKm] = useState<(typeof STAYS_RADIUS_OPTIONS)[number]>(5);
   const [rentalSubscribed, setRentalSubscribed] = useState(false);
@@ -2080,6 +2190,7 @@ export default function App() {
   const [routeLoading, setRouteLoading] = useState(false);
   const [mapZoomOffset, setMapZoomOffset] = useState(0);
   const [bookingMessage, setBookingMessage] = useState('');
+  const bookingToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [locationLoading, setLocationLoading] = useState(false);
   const [tripStarted, setTripStarted] = useState(false);
   const homeMainMapRef = useRef<WebView>(null);
@@ -2091,6 +2202,19 @@ export default function App() {
   const [laundryQuantity, setLaundryQuantity] = useState(4);
   /** null = door-to-door at your address; otherwise pickup & return at that station */
   const [laundryStationId, setLaundryStationId] = useState<string | null>(null);
+  const [laundryPickupMode, setLaundryPickupMode] = useState<LaundryPickupMode>('door');
+  const [selectedMamaFuaTasks, setSelectedMamaFuaTasks] = useState<string[]>([]);
+  const [serverLaundryEstimate, setServerLaundryEstimate] = useState<number | null>(null);
+  const [laundryOrders, setLaundryOrders] = useState<LaundryOrder[]>([]);
+  const [listingRequests, setListingRequests] = useState<ListingRequest[]>([]);
+  const [orderSubmitting, setOrderSubmitting] = useState(false);
+  const [requestSubmitting, setRequestSubmitting] = useState(false);
+  const [pullRefreshing, setPullRefreshing] = useState(false);
+  const [pullProgress, setPullProgress] = useState(0);
+  const [sheetHasMoreBelow, setSheetHasMoreBelow] = useState(false);
+  const sheetViewportH = useRef(0);
+  const sheetContentH = useRef(0);
+  const sheetScrollY = useRef(0);
   const [laundryMeasureMode, setLaundryMeasureMode] = useState<'kg' | 'items'>('kg');
   const [laundryItemCount, setLaundryItemCount] = useState(10);
   const [exploreScope, setExploreScope] = useState<'nearby' | 'everywhere'>('nearby');
@@ -2139,7 +2263,7 @@ export default function App() {
   const [listingRadiusKm, setListingRadiusKm] = useState<(typeof STAYS_RADIUS_OPTIONS)[number]>(5);
   const [valetMamaFuaHome, setValetMamaFuaHome] = useState(false);
   const [valetStudioNotes, setValetStudioNotes] = useState('');
-  const [valetStudioWhen, setValetStudioWhen] = useState<'asap' | 'morning' | 'evening'>('asap');
+  const [valetStudioWhen, setValetStudioWhen] = useState<'asap' | 'morning' | 'afternoon' | 'evening'>('asap');
   const [ridePlannerStop, setRidePlannerStop] = useState('');
   const [ridePlannerLuggage, setRidePlannerLuggage] = useState(false);
   const [ridePlannerMeetAssist, setRidePlannerMeetAssist] = useState(false);
@@ -2164,7 +2288,7 @@ export default function App() {
 
   const ridePickupDisplayLabel = useMemo(() => {
     if (ridePickupMode === 'station' && ridePickupStationId) {
-      const hub = PICKUP_STATIONS.find((s) => s.id === ridePickupStationId);
+      const hub = pickupStations.find((s) => s.id === ridePickupStationId);
       if (hub) return `${hub.name} · ${hub.subtitle}`;
     }
     return pickupDisplayLabel;
@@ -2246,6 +2370,19 @@ export default function App() {
     setHomeSheetStage(next);
   }, []);
 
+  const flashBookingNotice = useCallback(
+    (message: string, opts?: { goTrips?: boolean; autoDismissMs?: number }) => {
+      if (bookingToastTimerRef.current) clearTimeout(bookingToastTimerRef.current);
+      setBookingMessage(message);
+      if (opts?.goTrips) setActiveTab('trips');
+      const ms = opts?.autoDismissMs ?? 4000;
+      if (ms > 0) {
+        bookingToastTimerRef.current = setTimeout(() => setBookingMessage(''), ms);
+      }
+    },
+    [],
+  );
+
   const cycleSheetSnap = useCallback(
     (direction: 'up' | 'down') => {
       if (!onHomeTab || destinationSearchOpen) return;
@@ -2274,6 +2411,26 @@ export default function App() {
       }),
     [showDragHandle, cycleSheetSnap],
   );
+
+  const changeServiceBySwipe = useCallback(
+    (segment: SwipeableSegment) => {
+      LayoutAnimation.configureNext(
+        LayoutAnimation.create(260, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity),
+      );
+      setActiveSegment(segment);
+      if (segment !== 'home') {
+        setActiveService(segment);
+      }
+      setHomeSheetStageAnimated('mid');
+    },
+    [setHomeSheetStageAnimated],
+  );
+
+  const serviceSwipePan = useServiceSwipePan({
+    enabled: activeTab === 'home' && !destinationSearchOpen && homeDeepPage === null,
+    active: toSwipeableSegment(activeSegment),
+    onChange: changeServiceBySwipe,
+  });
 
   const setExploreSheetStageAnimated = useCallback((next: HomeSheetStage) => {
     LayoutAnimation.configureNext(
@@ -2396,7 +2553,7 @@ export default function App() {
         return;
       }
       if (data.type === 'ridePickupHub' && data.id) {
-        if (!PICKUP_STATIONS.some((s) => s.id === data.id)) return;
+        if (!pickupStations.some((s) => s.id === data.id)) return;
         setRidePickupStationId(data.id);
         setRidePickupMode('station');
         setRideWizardStep('pickup');
@@ -2408,7 +2565,7 @@ export default function App() {
         return;
       }
       if (data.type === 'ridePickupMapSelect' && data.id) {
-        if (!PICKUP_STATIONS.some((s) => s.id === data.id)) return;
+        if (!pickupStations.some((s) => s.id === data.id)) return;
         setRidePickupStationId(data.id);
         setRidePickupMode('station');
         setServiceMapRidePinFocus('hub');
@@ -2447,7 +2604,7 @@ export default function App() {
         return;
       }
       if (data.type === 'laundryStationPick' && data.id) {
-        if (!PICKUP_STATIONS.some((s) => s.id === data.id)) return;
+        if (!pickupStations.some((s) => s.id === data.id)) return;
         setLaundryStationId(data.id);
         setLaundryWizardStep('pickup');
         setPhaseForService('laundry', 'selecting');
@@ -2457,7 +2614,7 @@ export default function App() {
         return;
       }
       if (data.type === 'laundryStationMapSelect' && data.id) {
-        if (!PICKUP_STATIONS.some((s) => s.id === data.id)) return;
+        if (!pickupStations.some((s) => s.id === data.id)) return;
         setLaundryStationId(data.id);
         return;
       }
@@ -2507,29 +2664,97 @@ export default function App() {
         return 'Explore';
     }
   }, [activeService]);
+  const mamafuaWhenOptions = useMemo(() => {
+    if (mamaFuaConvenienceTimes.length) {
+      return mamaFuaConvenienceTimes.map((b) => ({
+        id: b.id,
+        label: b.label,
+        shortLabel: b.shortLabel,
+      }));
+    }
+    return DEFAULT_MAMAFUA_WHEN;
+  }, [mamaFuaConvenienceTimes]);
+
+  useEffect(() => {
+    if (!mamafuaWhenOptions.some((b) => b.id === valetStudioWhen)) {
+      setValetStudioWhen(mamafuaWhenOptions[0]?.id ?? 'asap');
+    }
+  }, [mamafuaWhenOptions, valetStudioWhen]);
+
   const selectedRide = RIDE_OPTIONS.find((ride) => ride.id === selectedRideId) || RIDE_OPTIONS[0];
+
   const nearbyStations = useMemo(() => {
     if (!currentCoords) {
-      return PICKUP_STATIONS.filter((station) => station.county === currentCounty);
+      return pickupStations.filter((station) => station.county === currentCounty);
     }
-    return PICKUP_STATIONS.filter(
+    return pickupStations.filter(
       (station) => getDistanceKm(currentCoords, station.coords) <= PICKUP_RADIUS_KM,
     );
-  }, [currentCoords, currentCounty]);
+  }, [currentCoords, currentCounty, pickupStations]);
+  const mapBnbs = useMemo(
+    () => bnbListings.filter((bnb) => bnb.county === currentCounty),
+    [bnbListings, currentCounty],
+  );
+  const mapHouses = useMemo(
+    () => houseListings.filter((house) => house.county === currentCounty),
+    [houseListings, currentCounty],
+  );
   const nearbyHouses = useMemo(() => {
-    return HOUSE_LISTINGS.filter((house) => {
-      if (house.county !== currentCounty) return false;
+    return mapHouses.filter((house) => {
       if (currentCoords) {
         return getDistanceKm(currentCoords, house.coords) <= staysRadiusKm;
       }
-      return house.distanceKm <= staysRadiusKm;
+      return true;
     });
-  }, [currentCounty, currentCoords, staysRadiusKm]);
-  const nearbyBnbs = BNB_LISTINGS.filter((bnb) => bnb.county === currentCounty);
+  }, [mapHouses, currentCoords, staysRadiusKm]);
+  const nearbyBnbs = mapBnbs;
   const featuredBnbs = useMemo(() => nearbyBnbs.slice(0, FEATURED_STAYS_HOME), [nearbyBnbs]);
   const featuredHouses = useMemo(() => nearbyHouses.slice(0, FEATURED_STAYS_HOME), [nearbyHouses]);
+  /** Home hub — geo-filtered by current pin + stays radius (same as stays sheet). */
+  const hubNearbyHouses = useMemo(() => {
+    if (!currentCoords) return [];
+    return mapHouses.filter((h) => getDistanceKm(currentCoords, h.coords) <= staysRadiusKm);
+  }, [mapHouses, currentCoords, staysRadiusKm]);
+  const hubNearbyBnbs = useMemo(() => {
+    if (!currentCoords) return [];
+    return mapBnbs.filter((b) => getDistanceKm(currentCoords, b.coords) <= staysRadiusKm);
+  }, [mapBnbs, currentCoords, staysRadiusKm]);
+  const hubListingPool = useMemo(() => {
+    const sortNear = <T extends { coords: Coordinates }>(items: T[]) =>
+      [...items].sort(
+        (a, b) => getDistanceKm(currentCoords!, a.coords) - getDistanceKm(currentCoords!, b.coords),
+      );
+    return { houses: sortNear(hubNearbyHouses), bnbs: sortNear(hubNearbyBnbs) };
+  }, [hubNearbyHouses, hubNearbyBnbs, currentCoords]);
+  const hubPopularListings = useMemo(() => {
+    const rows: { id: string; kind: 'bnb' | 'rental'; title: string; subtitle: string; image: { uri: string } }[] =
+      [];
+    for (const h of hubListingPool.houses) {
+      rows.push({
+        id: h.id,
+        kind: 'rental',
+        title: h.title,
+        subtitle: `Rental · ${h.beds} bed · ${h.price}`,
+        image: h.image,
+      });
+      if (rows.length >= 4) break;
+    }
+    if (rows.length < 4) {
+      for (const b of hubListingPool.bnbs) {
+        rows.push({
+          id: b.id,
+          kind: 'bnb',
+          title: b.title,
+          subtitle: `BnB · ${b.rating} · ${b.price}`,
+          image: b.image,
+        });
+        if (rows.length >= 4) break;
+      }
+    }
+    return rows;
+  }, [hubListingPool]);
   const catalogBnbs = useMemo(() => {
-    let rows = [...BNB_LISTINGS];
+    let rows = [...bnbListings];
     if (listingCounty === 'near_me') {
       if (!currentCoords) return [];
       rows = rows.filter((b) => getDistanceKm(currentCoords, b.coords) <= listingRadiusKm);
@@ -2547,7 +2772,7 @@ export default function App() {
     return rows;
   }, [listingCounty, listingQuery, listingSpace, currentCoords, listingRadiusKm]);
   const catalogHouses = useMemo(() => {
-    let rows = [...HOUSE_LISTINGS];
+    let rows = [...houseListings];
     if (listingCounty === 'near_me') {
       if (!currentCoords) return [];
       rows = rows.filter((h) => getDistanceKm(currentCoords, h.coords) <= listingRadiusKm);
@@ -2572,9 +2797,9 @@ export default function App() {
   const listingDetailEntity = useMemo((): BnbListing | HouseListing | null => {
     if (!listingDetail) return null;
     if (listingDetail.kind === 'bnb') {
-      return BNB_LISTINGS.find((b) => b.id === listingDetail.id) ?? null;
+      return bnbListings.find((b) => b.id === listingDetail.id) ?? null;
     }
-    return HOUSE_LISTINGS.find((h) => h.id === listingDetail.id) ?? null;
+    return houseListings.find((h) => h.id === listingDetail.id) ?? null;
   }, [listingDetail]);
   const listingDetailMoreRows = useMemo(() => {
     if (!listingDetail) return [];
@@ -2589,9 +2814,9 @@ export default function App() {
   }, [staysSubTab, focusedHouse, focusedBnb]);
   const tourListing =
     tourSheetTarget?.kind === 'bnb'
-      ? BNB_LISTINGS.find((b) => b.id === tourSheetTarget.id) ?? null
+      ? bnbListings.find((b) => b.id === tourSheetTarget.id) ?? null
       : tourSheetTarget?.kind === 'house'
-        ? HOUSE_LISTINGS.find((h) => h.id === tourSheetTarget.id) ?? null
+        ? houseListings.find((h) => h.id === tourSheetTarget.id) ?? null
         : null;
   const countyDestinations = DESTINATIONS.filter((destination) => destination.county === currentCounty);
   const popularNearbyDestinations = useMemo(() => {
@@ -2608,9 +2833,9 @@ export default function App() {
   }, [countyDestinations, currentCoords]);
   const exploreDestinations = exploreScope === 'everywhere' ? DESTINATIONS : popularNearbyDestinations;
   const exploreBnbs = useMemo(() => {
-    if (exploreScope === 'everywhere') return BNB_LISTINGS;
+    if (exploreScope === 'everywhere') return bnbListings;
     if (currentCoords) {
-      return BNB_LISTINGS.filter((b) => getDistanceKm(currentCoords, b.coords) <= listingRadiusKm);
+      return bnbListings.filter((b) => getDistanceKm(currentCoords, b.coords) <= listingRadiusKm);
     }
     return nearbyBnbs;
   }, [exploreScope, currentCoords, listingRadiusKm, nearbyBnbs]);
@@ -2690,12 +2915,12 @@ export default function App() {
       : null;
   const laundryMapHighlight = useMemo(() => {
     if (!laundryStationId) return null;
-    const s = PICKUP_STATIONS.find((x) => x.id === laundryStationId);
+    const s = pickupStations.find((x) => x.id === laundryStationId);
     return s ? s.coords : null;
   }, [laundryStationId]);
   const rideMapHighlight = useMemo(() => {
     if (ridePickupMode !== 'station' || !ridePickupStationId) return null;
-    const s = PICKUP_STATIONS.find((x) => x.id === ridePickupStationId);
+    const s = pickupStations.find((x) => x.id === ridePickupStationId);
     return s ? s.coords : null;
   }, [ridePickupMode, ridePickupStationId]);
   const homeMapPinBanks = useMemo(() => {
@@ -2709,17 +2934,17 @@ export default function App() {
       coords: s.coords,
       kind: 'station',
     }));
-    const bnbPins: HomeUnifiedPin[] = nearbyBnbs.map((b) => ({
+    const bnbPins: HomeUnifiedPin[] = mapBnbs.map((b) => ({
       id: b.id,
       title: b.title,
       subtitle: `${b.county} · ${b.rating} · ${b.price}`,
       coords: b.coords,
       kind: 'bnb',
     }));
-    const housePins: HomeUnifiedPin[] = nearbyHouses.map((h) => ({
+    const housePins: HomeUnifiedPin[] = mapHouses.map((h) => ({
       id: h.id,
       title: h.title,
-      subtitle: `${h.distanceKm} km · ${h.price}`,
+      subtitle: `${h.price}${currentCoords ? ` · ${Math.max(1, Math.round(getDistanceKm(currentCoords, h.coords) * 10) / 10)} km` : ''}`,
       coords: h.coords,
       kind: 'house',
     }));
@@ -2741,7 +2966,7 @@ export default function App() {
       kind: 'destination',
     }));
     return { laundry: laundryPins, bnbs: bnbPins, houses: housePins, rides: ridePins, destinations: destinationPins };
-  }, [nearbyStations, nearbyBnbs, nearbyHouses, currentCoords, popularNearbyDestinations]);
+  }, [nearbyStations, mapBnbs, mapHouses, currentCoords, popularNearbyDestinations]);
 
   const serviceMapViewportPad = useMemo(
     (): MapViewportPad => ({
@@ -2774,7 +2999,6 @@ export default function App() {
     theme.canvas,
     homeMapPinBanks,
     currentCoords,
-    homeMapCameraPad,
   ]);
 
   const serviceMapHtml = useMemo(() => {
@@ -2804,7 +3028,7 @@ export default function App() {
   const staysHomeMapHtml = useMemo(() => {
     if (!MAPBOX_ACCESS_TOKEN) return null;
     const isRental = staysSubTab === 'rental';
-    const rows = isRental ? nearbyHouses : nearbyBnbs;
+    const rows = isRental ? mapHouses : mapBnbs;
     const pins: HomeUnifiedPin[] = rows.map((row) =>
       isRental
         ? {
@@ -2890,6 +3114,30 @@ export default function App() {
     serviceMapViewportPad,
   ]);
 
+  const injectMapHighlight = useCallback(
+    (ref: React.RefObject<WebView | null>, highlight: Coordinates | null) => {
+      const wv = ref.current;
+      if (!wv || !MAPBOX_ACCESS_TOKEN) return;
+      const hlJs =
+        highlight != null
+          ? `if(window.juaSetHighlight)window.juaSetHighlight(${highlight.longitude},${highlight.latitude});`
+          : 'if(window.juaSetHighlight)window.juaSetHighlight(null,null);';
+      wv.injectJavaScript(`setTimeout(function(){try{${hlJs}}catch(e){}},40);true;`);
+    },
+    [MAPBOX_ACCESS_TOKEN],
+  );
+
+  const injectMapViewportPad = useCallback(
+    (ref: React.RefObject<WebView | null>, pad: MapViewportPad) => {
+      const wv = ref.current;
+      if (!wv) return;
+      wv.injectJavaScript(
+        `setTimeout(function(){try{if(window.juaSetViewportPad)window.juaSetViewportPad(${JSON.stringify(pad)});}catch(e){}},40);true;`,
+      );
+    },
+    [],
+  );
+
   const injectListingsMapSync = useCallback(() => {
     const wv = listingsMapWebViewRef.current;
     if (!wv || !MAPBOX_ACCESS_TOKEN || !listingsMapHtml) return;
@@ -2905,7 +3153,7 @@ export default function App() {
     wv.injectJavaScript(
       `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
         mode,
-      )});${hlJs}${userJs}}catch(e){}},80);true;`,
+      )}, false);${hlJs}${userJs}}catch(e){}},80);true;`,
     );
   }, [
     MAPBOX_ACCESS_TOKEN,
@@ -2930,7 +3178,7 @@ export default function App() {
     wv.injectJavaScript(
       `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
         mode,
-      )});${hlJs}${userJs}}catch(e){}},80);true;`,
+      )}, false);${hlJs}${userJs}}catch(e){}},80);true;`,
     );
   }, [MAPBOX_ACCESS_TOKEN, staysHomeMapHtml, staysSubTab, staysHomeMapHighlight, currentCoords]);
 
@@ -2950,7 +3198,7 @@ export default function App() {
     wv.injectJavaScript(
       `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
         mode,
-      )});${hlJs}${userJs}${pickupJs}}catch(e){}},80);true;`,
+      )}, false);${hlJs}${userJs}${pickupJs}}catch(e){}},80);true;`,
     );
   }, [activeService, staysSubTab, MAPBOX_ACCESS_TOKEN, unifiedHomeMapHtml, laundryMapHighlight, currentCoords]);
 
@@ -2991,7 +3239,7 @@ export default function App() {
     wv.injectJavaScript(
       `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
         mode,
-      )});${ridesFocusJs}${hlJs}${userJs}${pickupJs}}catch(e){}},80);true;`,
+      )}, false);${ridesFocusJs}${hlJs}${userJs}${pickupJs}}catch(e){}},80);true;`,
     );
   }, [
     activeService,
@@ -3039,6 +3287,59 @@ export default function App() {
   }, [injectMapSync]);
 
   useEffect(() => {
+    if (!MAPBOX_ACCESS_TOKEN) return;
+    const pad = homeMapCameraPad;
+    injectMapViewportPad(homeMainMapRef, pad);
+    injectMapViewportPad(staysHomeMapWebViewRef, pad);
+    injectMapViewportPad(serviceMapWebViewRef, serviceMapViewportPad);
+    injectMapViewportPad(listingsMapWebViewRef, serviceMapViewportPad);
+  }, [MAPBOX_ACCESS_TOKEN, homeMapCameraPad, serviceMapViewportPad, injectMapViewportPad]);
+
+  useEffect(() => {
+    if (!MAPBOX_ACCESS_TOKEN) return;
+    const banksJson = JSON.stringify({
+      laundry: homeMapPinBanks.laundry.slice(0, 14).map((p) => ({
+        id: p.id,
+        title: p.title,
+        subtitle: p.subtitle,
+        kind: p.kind,
+        coords: [p.coords.longitude, p.coords.latitude],
+      })),
+      bnbs: homeMapPinBanks.bnbs.slice(0, 50).map((p) => ({
+        id: p.id,
+        title: p.title,
+        subtitle: p.subtitle,
+        kind: p.kind,
+        coords: [p.coords.longitude, p.coords.latitude],
+      })),
+      houses: homeMapPinBanks.houses.slice(0, 50).map((p) => ({
+        id: p.id,
+        title: p.title,
+        subtitle: p.subtitle,
+        kind: p.kind,
+        coords: [p.coords.longitude, p.coords.latitude],
+      })),
+      rides: homeMapPinBanks.rides.slice(0, 14).map((p) => ({
+        id: p.id,
+        title: p.title,
+        subtitle: p.subtitle,
+        kind: p.kind,
+        coords: [p.coords.longitude, p.coords.latitude],
+      })),
+      destinations: homeMapPinBanks.destinations.slice(0, 8).map((p) => ({
+        id: p.id,
+        title: p.title,
+        subtitle: p.subtitle,
+        kind: p.kind,
+        coords: [p.coords.longitude, p.coords.latitude],
+      })),
+    });
+    const js = `setTimeout(function(){try{if(window.juaUpdatePinBanks)window.juaUpdatePinBanks(${banksJson});}catch(e){}},60);true;`;
+    homeMainMapRef.current?.injectJavaScript(js);
+    serviceMapWebViewRef.current?.injectJavaScript(js);
+  }, [MAPBOX_ACCESS_TOKEN, homeMapPinBanks]);
+
+  useEffect(() => {
     if (activeService !== 'bnbs' && activeService !== 'houses') {
       setStaysSheetViewMode('list');
     }
@@ -3059,13 +3360,16 @@ export default function App() {
     homeDeepPage,
     injectStaysHomeMapSync,
     staysSubTab,
-    nearbyBnbs,
-    nearbyHouses,
+    mapBnbs,
+    mapHouses,
     staysRadiusKm,
-    selectedBnbId,
-    selectedHouseId,
     currentCoords,
   ]);
+
+  useEffect(() => {
+    if (staysSheetViewMode !== 'map' || homeDeepPage !== null) return;
+    injectMapHighlight(staysHomeMapWebViewRef, staysHomeMapHighlight);
+  }, [staysSheetViewMode, homeDeepPage, staysHomeMapHighlight, injectMapHighlight, selectedBnbId, selectedHouseId]);
 
   useEffect(() => {
     if (homeDeepPage === 'service-map') {
@@ -3095,15 +3399,25 @@ export default function App() {
     listingCatalog,
     catalogBnbs,
     catalogHouses,
-    listingsMapSelectedId,
     currentCoords,
   ]);
 
   useEffect(() => {
-    if (isActiveTripMode) {
+    if (homeDeepPage !== 'listings' || listingsViewMode !== 'map') return;
+    injectMapHighlight(listingsMapWebViewRef, listingsMapHighlight);
+  }, [homeDeepPage, listingsViewMode, listingsMapHighlight, injectMapHighlight, listingsMapSelectedId]);
+
+  useEffect(() => {
+    if (isActiveTripMode && activeService === 'rides' && servicePhase.rides === 'active_trip') {
       setHomeSheetStageAnimated('collapsed');
     }
-  }, [isActiveTripMode, setHomeSheetStageAnimated]);
+  }, [isActiveTripMode, activeService, servicePhase.rides, setHomeSheetStageAnimated]);
+
+  useEffect(() => {
+    return () => {
+      if (bookingToastTimerRef.current) clearTimeout(bookingToastTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (destinationSearchOpen) {
@@ -3407,6 +3721,230 @@ export default function App() {
     fetchCurrentLocation();
   }, []);
 
+  const reloadLaundryOrders = useCallback(async () => {
+    if (!isAuthed) return;
+    try {
+      const orders = await fetchLaundryOrders();
+      setLaundryOrders(orders);
+    } catch {
+      /* keep existing */
+    }
+  }, [isAuthed]);
+
+  useEffect(() => {
+    if (isAuthed) void reloadLaundryOrders();
+  }, [isAuthed, reloadLaundryOrders]);
+
+  const handlePullRefresh = useCallback(async () => {
+    setPullRefreshing(true);
+    setPullProgress(1);
+    try {
+      // Sequential — parallel refresh was opening many Vercel/DB connections at once.
+      await refreshAppData();
+      if (isAuthed) {
+        await reloadLaundryOrders();
+        await refreshProfile();
+      }
+    } finally {
+      setPullRefreshing(false);
+      setPullProgress(0);
+    }
+  }, [refreshAppData, isAuthed, reloadLaundryOrders, refreshProfile]);
+
+  const onSheetScroll = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const y = e.nativeEvent.contentOffset.y;
+      sheetScrollY.current = y;
+      const hasMore = sheetContentH.current > sheetViewportH.current + 12;
+      const atBottom = y + sheetViewportH.current >= sheetContentH.current - 28;
+      setSheetHasMoreBelow(hasMore && !atBottom);
+
+      if (pullRefreshing) return;
+      if (Platform.OS === 'ios' && y < 0) {
+        setPullProgress(Math.min(1, Math.abs(y) / PULL_REFRESH_THRESHOLD));
+        return;
+      }
+      setPullProgress((p) => (p === 0 ? p : 0));
+    },
+    [pullRefreshing],
+  );
+
+  const onSheetContentSizeChange = useCallback((_w: number, h: number) => {
+    sheetContentH.current = h;
+    const hasMore = h > sheetViewportH.current + 12;
+    const atBottom = sheetScrollY.current + sheetViewportH.current >= h - 28;
+    setSheetHasMoreBelow(hasMore && !atBottom);
+  }, []);
+
+  const onSheetLayout = useCallback((e: { nativeEvent: { layout: { height: number } } }) => {
+    sheetViewportH.current = e.nativeEvent.layout.height;
+    const hasMore = sheetContentH.current > sheetViewportH.current + 12;
+    const atBottom = sheetScrollY.current + sheetViewportH.current >= sheetContentH.current - 28;
+    setSheetHasMoreBelow(hasMore && !atBottom);
+  }, []);
+
+  const onSheetScrollEndDrag = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      if (pullRefreshing) return;
+      if (e.nativeEvent.contentOffset.y >= 0) {
+        setPullProgress(0);
+      }
+    },
+    [pullRefreshing],
+  );
+
+  const showPullRefreshStrip = pullRefreshing || pullProgress > 0.08;
+  const pullRefreshLabel = pullRefreshing
+    ? 'Refreshing…'
+    : pullProgress >= 1
+      ? 'Release to refresh'
+      : 'Pull to refresh';
+
+  const submitListingRequest = useCallback(
+    async (
+      kind: ListingRequestKind,
+      listingId: string,
+      listingTitle: string,
+      catalog: 'bnb' | 'house',
+      opts?: { closeDeepPage?: boolean },
+    ) => {
+      if (!isAuthed) {
+        setBookingMessage('Sign in to request tours, viewings, and stays');
+        return;
+      }
+      setRequestSubmitting(true);
+      try {
+        const service = catalog === 'bnb' ? 'bnb' : 'rental';
+        const title =
+          kind === 'tour' ? '3D tour request' : kind === 'viewing' ? 'Viewing request' : 'Stay reservation';
+        const body = `I would like to request a ${kind} for "${listingTitle}". Please follow up via the app.`;
+        const { feedback } = await submitFeedback({
+          service,
+          category: 'suggestion',
+          title,
+          body,
+          listingId,
+        });
+        setListingRequests((prev) => {
+          if (prev.some((r) => r.id === feedback.id)) return prev;
+          return [
+            {
+              id: feedback.id,
+              listingId,
+              listingTitle,
+              kind,
+              status: feedback.status,
+              createdAt: feedback.createdAt,
+            },
+            ...prev,
+          ];
+        });
+        flashBookingNotice(`${title} submitted — check Trips`, { goTrips: true });
+        setPhaseForService('bnbs', 'confirmed');
+        if (opts?.closeDeepPage) {
+          setHomeDeepPage(null);
+          setListingDetail(null);
+        }
+      } catch (err) {
+        setBookingMessage(err instanceof Error ? err.message : 'Could not submit request — try again');
+      } finally {
+        setRequestSubmitting(false);
+      }
+    },
+    [flashBookingNotice, isAuthed],
+  );
+
+  const subscribeToKeja = useCallback(async () => {
+    if (!isAuthed) {
+      setBookingMessage('Sign in to unlock rentals and request viewings');
+      return;
+    }
+    const plan = subscriptionPlans[0];
+    setRequestSubmitting(true);
+    try {
+      await submitFeedback({
+        service: 'rental',
+        category: 'suggestion',
+        title: 'Subscription interest',
+        body: `Interested in ${plan?.label ?? 'Weekly'} plan (KES ${plan?.priceKes ?? 299}) to unlock exact locations and request viewings.`,
+      });
+      setRentalSubscribed(true);
+      setBookingMessage('Subscription request sent — you can now request viewings');
+    } catch (err) {
+      setBookingMessage(err instanceof Error ? err.message : 'Could not submit subscription request');
+    } finally {
+      setRequestSubmitting(false);
+    }
+  }, [isAuthed, subscriptionPlans]);
+
+  const buildLaundryOrderBody = useCallback(() => {
+    const scheduleDate = new Date().toISOString().slice(0, 10);
+    const scheduleBand = valetStudioWhen;
+    const base = {
+      pickupCounty: currentCounty,
+      scheduleDate,
+      scheduleBand,
+      notes: valetStudioNotes.trim() || undefined,
+    };
+    if (laundryPickupMode === 'mamafua') {
+      return {
+        ...base,
+        pickupMode: 'mamafua',
+        pickupAddress: currentPickupLocation,
+        pickupLat: currentCoords?.latitude,
+        pickupLng: currentCoords?.longitude,
+        tasks: selectedMamaFuaTasks,
+        loadKg: selectedMamaFuaTasks.includes('laundry') ? laundryQuantity : 0,
+      };
+    }
+    if (laundryPickupMode !== 'mamafua' && laundryStationId) {
+      return {
+        ...base,
+        pickupMode: 'station',
+        stationId: laundryStationId,
+        loadKg: laundryMeasureMode === 'kg' ? laundryQuantity : 0,
+        loadItems: laundryMeasureMode === 'items' ? laundryItemCount : undefined,
+      };
+    }
+    return {
+      ...base,
+      pickupMode: 'door',
+      pickupAddress: currentPickupLocation,
+      pickupLat: currentCoords?.latitude,
+      pickupLng: currentCoords?.longitude,
+      loadKg: laundryMeasureMode === 'kg' ? laundryQuantity : 0,
+      loadItems: laundryMeasureMode === 'items' ? laundryItemCount : undefined,
+    };
+  }, [
+    currentCounty,
+    currentCoords,
+    currentPickupLocation,
+    laundryItemCount,
+    laundryMeasureMode,
+    laundryPickupMode,
+    laundryQuantity,
+    laundryStationId,
+    selectedMamaFuaTasks,
+    valetStudioNotes,
+    valetStudioWhen,
+  ]);
+
+  useEffect(() => {
+    if (!isAuthed || activeService !== 'laundry' || laundryWizardStep !== 'review') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const est = await estimateLaundryOrder(buildLaundryOrderBody());
+        if (!cancelled) setServerLaundryEstimate(est.estimateKes);
+      } catch {
+        if (!cancelled) setServerLaundryEstimate(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthed, activeService, laundryWizardStep, buildLaundryOrderBody]);
+
   const lastBackPressRef = useRef(0);
 
   const handleHardwareBack = useCallback((): boolean => {
@@ -3555,8 +4093,8 @@ export default function App() {
     if (homeDeepPage !== 'listing-detail' || !listingDetail) return;
     const ok =
       listingDetail.kind === 'bnb'
-        ? BNB_LISTINGS.some((b) => b.id === listingDetail.id)
-        : HOUSE_LISTINGS.some((h) => h.id === listingDetail.id);
+        ? bnbListings.some((b) => b.id === listingDetail.id)
+        : houseListings.some((h) => h.id === listingDetail.id);
     if (!ok) {
       setListingDetail(null);
       setHomeDeepPage('listings');
@@ -4527,9 +5065,9 @@ export default function App() {
   const renderOnboarding = () => (
     <OnboardingFlow
       onComplete={() => {
-        setIsAuthed(true);
         setActiveTab('home');
         setHomeSheetStage('mid');
+        setActiveSegment('home');
       }}
     />
   );
@@ -4537,7 +5075,9 @@ export default function App() {
   const renderHome = () => {
     const serviceMapTitle =
       activeService === 'laundry'
-        ? 'Pickup stations near you'
+        ? laundryPickupMode === 'mamafua'
+          ? 'Confirm your home location'
+          : 'Pickup stations near you'
         : activeService === 'rides'
           ? rideWizardStep === 'destination'
             ? 'Top destinations near you'
@@ -4566,8 +5106,8 @@ export default function App() {
       !homeListingPreview
         ? null
         : homeListingPreview.catalog === 'bnb'
-          ? (BNB_LISTINGS.find((b) => b.id === homeListingPreview.id) ?? null)
-          : (HOUSE_LISTINGS.find((h) => h.id === homeListingPreview.id) ?? null);
+          ? (bnbListings.find((b) => b.id === homeListingPreview.id) ?? null)
+          : (houseListings.find((h) => h.id === homeListingPreview.id) ?? null);
 
     const heroCardWidth = windowWidth - gutter * 2;
     const renderSectionHero = (slides: IntroHeroSlide[], hint: string, height = 200) => (
@@ -4588,7 +5128,7 @@ export default function App() {
             {renderSectionHero(comingSoonHeroSlides(activeSegment), `How ${info.title} will work`)}
             <View style={[styles.comingSoonEmojiBanner, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
               <Text style={[styles.comingSoonEmojiBannerText, { color: theme.primary }]}>
-                {info.emoji} Coming soon
+                Coming soon
               </Text>
             </View>
             <Text style={[styles.juxSectionLabel, styles.valetSectionLabelSpaced]}>What to expect</Text>
@@ -4605,80 +5145,194 @@ export default function App() {
         );
       }
       if (activeTab === 'trips') {
-        const tripsActive = [
-          ...MAKE_TRIPS.active,
-          ...tripFeed.map((trip, index) => ({
-            type: 'ride' as const,
-            id: `live-${index}`,
-            title: trip,
-            sub: 'Active',
-            step: 1,
-            steps: ['Requested', 'En route', 'Arrived', 'Complete'],
+        const activeOrders = laundryOrders.filter(
+          (o) => !['delivered', 'cancelled'].includes(o.status),
+        );
+        const completedOrders = laundryOrders.filter((o) =>
+          ['delivered', 'cancelled'].includes(o.status),
+        );
+        const pendingPayments = laundryOrders.filter(
+          (o) => o.paymentStatus === 'pending' || o.paymentStatus === 'unpaid',
+        );
+        const openRequests = listingRequests.filter((r) => r.status === 'new' || r.status === 'reviewed');
+
+        const activeItems = [
+          ...activeOrders.map((order) => ({
+            type: 'laundry' as const,
+            id: order.id,
+            title: order.pickupLabel,
+            sub: `${order.loadLabel} · ${order.status.replace(/_/g, ' ')}`,
+            payment: order.paymentStatus ?? 'pending',
+            amount: `KES ${order.totalKes.toLocaleString()}`,
+            step: order.currentStep,
+            steps: order.steps,
+          })),
+          ...openRequests.map((req) => ({
+            type: 'stay' as const,
+            id: req.id,
+            title:
+              req.kind === 'tour'
+                ? `Tour · ${req.listingTitle}`
+                : req.kind === 'viewing'
+                  ? `Viewing · ${req.listingTitle}`
+                  : `Stay · ${req.listingTitle}`,
+            sub: `${req.status} · awaiting follow-up`,
+            payment: '—',
+            amount: '—',
+            step: 0,
+            steps: ['Requested', 'Agent contact', 'Scheduled', 'Done'],
           })),
         ];
+
+        const historyItems = [
+          ...completedOrders.map((order) => ({
+            id: order.id,
+            title: order.pickupLabel,
+            date: new Date(order.createdAt).toLocaleDateString('en-KE', { month: 'short', day: 'numeric' }),
+            amount: `KES ${order.totalKes.toLocaleString()}`,
+            payment: order.paymentStatus ?? 'pending',
+          })),
+          ...listingRequests
+            .filter((r) => r.status === 'resolved')
+            .map((r) => ({
+              id: r.id,
+              title: r.listingTitle,
+              date: new Date(r.createdAt).toLocaleDateString('en-KE', { month: 'short', day: 'numeric' }),
+              amount: '—',
+              payment: '—',
+            })),
+        ];
+
         return (
           <>
             <Text style={styles.makeTripsTitle}>My Trips</Text>
+            {!isAuthed ? (
+              <Text style={[styles.juxHintMuted, { marginBottom: 16 }]}>Sign in to track orders and requests.</Text>
+            ) : null}
             <MakeLabel darkMode={themeMode === 'dark'}>Active</MakeLabel>
             <View style={styles.makeTripsActiveList}>
-              {tripsActive.map((trip) => (
-                <View key={trip.id} style={[styles.makeTripCard, { backgroundColor: theme.sheet }]}>
-                  <View style={styles.makeTripCardHead}>
+              {activeItems.length === 0 ? (
+                <View style={[styles.makeTripCard, { backgroundColor: theme.sheet }]}>
+                  <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                    No active orders — book Fua or request a listing tour from Home.
+                  </Text>
+                </View>
+              ) : (
+                activeItems.map((trip) => (
+                  <View key={`${trip.type}-${trip.id}`} style={[styles.makeTripCard, { backgroundColor: theme.sheet }]}>
+                    <View style={styles.makeTripCardHead}>
+                      <View
+                        style={[
+                          styles.makeTripDotWrap,
+                          { backgroundColor: `${SERVICE_DOT_COLORS[trip.type]}33` },
+                        ]}
+                      >
+                        <View
+                          style={[styles.makeTripDot, { backgroundColor: SERVICE_DOT_COLORS[trip.type] }]}
+                        />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{trip.title}</Text>
+                        <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>{trip.sub}</Text>
+                        {trip.amount !== '—' ? (
+                          <Text style={[styles.makeTripSub, { color: theme.textMuted }]}>
+                            {trip.amount} · Pay: {trip.payment}
+                          </Text>
+                        ) : null}
+                      </View>
+                    </View>
+                    {trip.steps.length > 0 ? (
+                      <>
+                        <MakeDivider darkMode={themeMode === 'dark'} />
+                        <MakeStatusStepper steps={trip.steps} current={trip.step} darkMode={themeMode === 'dark'} />
+                      </>
+                    ) : null}
+                  </View>
+                ))
+              )}
+            </View>
+            {pendingPayments.length > 0 ? (
+              <>
+                <MakeLabel darkMode={themeMode === 'dark'}>Payments due</MakeLabel>
+                <View style={[styles.makeHistoryCard, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
+                  {pendingPayments.map((order, i) => (
                     <View
+                      key={order.id}
                       style={[
-                        styles.makeTripDotWrap,
-                        { backgroundColor: `${SERVICE_DOT_COLORS[trip.type]}33` },
+                        styles.makeHistoryRow,
+                        i < pendingPayments.length - 1 && {
+                          borderBottomWidth: StyleSheet.hairlineWidth,
+                          borderBottomColor: theme.border,
+                        },
                       ]}
                     >
-                      <View
-                        style={[styles.makeTripDot, { backgroundColor: SERVICE_DOT_COLORS[trip.type] }]}
-                      />
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{order.pickupLabel}</Text>
+                        <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                          M-Pesa · {order.paymentStatus}
+                        </Text>
+                      </View>
+                      <Text style={[styles.makeHistoryAmount, { color: theme.primary }]}>
+                        KES {order.totalKes.toLocaleString()}
+                      </Text>
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{trip.title}</Text>
-                      <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>🕐 {trip.sub}</Text>
-                    </View>
-                  </View>
-                  {trip.steps.length > 0 ? (
-                    <>
-                      <MakeDivider darkMode={themeMode === 'dark'} />
-                      <MakeStatusStepper
-                        steps={trip.steps}
-                        current={trip.step}
-                        darkMode={themeMode === 'dark'}
-                      />
-                    </>
-                  ) : null}
+                  ))}
                 </View>
-              ))}
-            </View>
+              </>
+            ) : null}
             <MakeLabel darkMode={themeMode === 'dark'}>History</MakeLabel>
             <View style={[styles.makeHistoryCard, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
-              {MAKE_TRIPS.history.map((h, i) => (
-                <View
-                  key={h.id}
-                  style={[
-                    styles.makeHistoryRow,
-                    i < MAKE_TRIPS.history.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.border },
-                  ]}
-                >
-                  <View style={[styles.makeHistoryIcon, { backgroundColor: theme.mutedSurface }]}>
-                    <Text style={styles.makeHistoryCheck}>✓</Text>
+              {historyItems.length === 0 ? (
+                <Text style={[styles.makeTripSub, { color: theme.textSecondary, padding: 12 }]}>
+                  Completed orders appear here.
+                </Text>
+              ) : (
+                historyItems.map((h, i) => (
+                  <View
+                    key={h.id}
+                    style={[
+                      styles.makeHistoryRow,
+                      i < historyItems.length - 1 && {
+                        borderBottomWidth: StyleSheet.hairlineWidth,
+                        borderBottomColor: theme.border,
+                      },
+                    ]}
+                  >
+                    <View style={[styles.makeHistoryIcon, { backgroundColor: theme.mutedSurface }]}>
+                      <Text style={styles.makeHistoryCheck}>✓</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{h.title}</Text>
+                      <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                        {h.date} · {h.payment}
+                      </Text>
+                    </View>
+                    <Text style={[styles.makeHistoryAmount, { color: theme.textSecondary }]}>{h.amount}</Text>
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{h.title}</Text>
-                    <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                      {h.date} · Completed
-                    </Text>
-                  </View>
-                  <Text style={[styles.makeHistoryAmount, { color: theme.textSecondary }]}>{h.amount}</Text>
-                </View>
-              ))}
+                ))
+              )}
             </View>
           </>
         );
       }
       if (activeTab === 'profile') {
+        const displayName = profile?.displayName ?? user?.displayName ?? 'Guest';
+        const phone = profile?.phone ?? user?.phone ?? '';
+        const email = profile?.email ?? user?.email ?? '';
+        const initials = displayName
+          .split(' ')
+          .map((p) => p[0])
+          .join('')
+          .slice(0, 2)
+          .toUpperCase();
+        const memberSince = profile?.signedUpAt
+          ? new Date(profile.signedUpAt).toLocaleDateString('en-KE', { month: 'short', year: 'numeric' })
+          : '—';
+        const laundryCount = profile?.stats?.laundryOrders ?? laundryOrders.length;
+        const membershipLabel =
+          subscriptionPlans.length > 0
+            ? `${subscriptionPlans[0].label} from KES ${subscriptionPlans[0].priceKes}`
+            : 'Browse plans in Saka Keja';
         const profileSections = [
           {
             title: 'Account',
@@ -4702,18 +5356,26 @@ export default function App() {
           <>
             <View style={styles.makeProfileHead}>
               <View style={[styles.makeProfileAvatar, { backgroundColor: theme.primary }]}>
-                <Text style={styles.makeProfileAvatarText}>AM</Text>
+                <Text style={styles.makeProfileAvatarText}>{initials || 'JX'}</Text>
               </View>
               <View>
-                <Text style={[styles.makeProfileName, { color: theme.textPrimary }]}>Alex Mwangi</Text>
-                <Text style={[styles.makeProfilePhone, { color: theme.textSecondary }]}>+254 712 *** 456</Text>
+                <Text style={[styles.makeProfileName, { color: theme.textPrimary }]}>{displayName}</Text>
+                <Text style={[styles.makeProfilePhone, { color: theme.textSecondary }]}>
+                  {email || phone}
+                </Text>
               </View>
             </View>
+            <Pressable
+              onPress={() => void signOut()}
+              style={[styles.makeProfileCard, { backgroundColor: theme.sheet, borderColor: theme.border, marginBottom: 16 }]}
+            >
+              <Text style={[styles.makeProfileRowLabel, { color: Colors.light.error }]}>Sign out</Text>
+            </Pressable>
             <View style={styles.makeStatsGrid}>
               {[
-                { label: 'Member since', value: 'Jan 2025' },
-                { label: 'Total trips', value: '18' },
-                { label: 'Laundry kg', value: '62 kg' },
+                { label: 'Member since', value: memberSince },
+                { label: 'FUA orders', value: String(laundryCount) },
+                { label: 'Membership', value: membershipLabel },
               ].map((s) => (
                 <View key={s.label} style={[styles.makeStatCell, { backgroundColor: theme.mutedSurface }]}>
                   <Text style={[styles.makeStatLabel, { color: theme.textSecondary }]}>{s.label}</Text>
@@ -4813,7 +5475,81 @@ export default function App() {
         );
       }
 
-      switch (activeService) {
+      const activeHubTripCount =
+        laundryOrders.filter((o) => !['delivered', 'cancelled'].includes(o.status)).length +
+        listingRequests.filter((r) => r.status === 'new' || r.status === 'reviewed').length;
+
+      if (activeSegment === 'home') {
+        return (
+          <HomeHub
+            slides={HOME_HERO_SLIDES}
+            carouselHint="Swipe for more · switch services with the bar above"
+            cardWidth={heroCardWidth}
+            locationLabel={locationLoading ? 'Locating…' : currentLocationLabel}
+            county={currentCounty}
+            darkMode={themeMode === 'dark'}
+            activeTripCount={activeHubTripCount}
+            listingsLoading={dataLoading}
+            listingsLoaded={listingsLoaded}
+            listingsError={dataError}
+            onRetryListings={() => void refreshAppData()}
+            theme={theme}
+            popularStays={hubListingPool.bnbs.slice(0, 5).map((b) => ({
+              id: b.id,
+              title: b.title,
+              meta: `${b.rating} · ${b.price}`,
+              image: b.image,
+            }))}
+            popularListings={hubPopularListings}
+            nearbyRadiusKm={staysRadiusKm}
+            hasLocation={!!currentCoords}
+            locationLoading={locationLoading}
+            onBrowseListings={() => {
+              setActiveSegment('bnbs');
+              setActiveService('bnbs');
+              setListingCounty('any');
+              setHomeDeepPage('listings');
+              setHomeSheetStageAnimated('full');
+            }}
+            onQuickService={(service) => {
+              setActiveSegment(service);
+              setActiveService(service);
+              setHomeSheetStageAnimated('mid');
+            }}
+            onComingSoonService={() => {
+              setActiveSegment('rides');
+              setHomeSheetStageAnimated('mid');
+            }}
+            onOpenStay={(id) => {
+              setSelectedBnbId(id);
+              setSelectedHouseId(null);
+              setActiveSegment('bnbs');
+              setActiveService('bnbs');
+              setStaysSubTab('bnb');
+              setHomeSheetStageAnimated('mid');
+            }}
+            onOpenListing={(id, kind) => {
+              if (kind === 'bnb') {
+                setSelectedBnbId(id);
+                setSelectedHouseId(null);
+                setActiveSegment('bnbs');
+                setActiveService('bnbs');
+                setStaysSubTab('bnb');
+              } else {
+                setSelectedHouseId(id);
+                setSelectedBnbId(null);
+                setActiveSegment('bnbs');
+                setActiveService('bnbs');
+                setStaysSubTab('rental');
+              }
+              setHomeSheetStageAnimated('mid');
+            }}
+            onOpenTrips={() => setActiveTab('trips')}
+          />
+        );
+      }
+
+      switch (activeSegment) {
         case 'rides': {
           const hubMode = ridePickupMode === 'station';
           const visibleRideHubs = nearbyStations.slice(0, 4);
@@ -4824,7 +5560,7 @@ export default function App() {
           const bookingMeta = bookingIndex >= 0 ? RIDE_WIZARD_BOOKING[bookingIndex] : null;
           const pickupLabel =
             ridePickupMode === 'station' && ridePickupStationId
-              ? PICKUP_STATIONS.find((s) => s.id === ridePickupStationId)?.name ?? 'Pickup hub'
+              ? pickupStations.find((s) => s.id === ridePickupStationId)?.name ?? 'Pickup hub'
               : 'Your location';
           const renderWizardChrome = () =>
             bookingMeta ? (
@@ -4850,9 +5586,6 @@ export default function App() {
             ) : null;
           return (
             <>
-              {isRideBookingWizardStep(rideWizardStep)
-                ? renderSectionHero(RIDES_HERO_SLIDES, 'How Jua Rides works')
-                : null}
               {isRideBookingWizardStep(rideWizardStep) ? renderWizardChrome() : null}
               {rideWizardStep === 'pickup' ? (
                 <>
@@ -4897,6 +5630,7 @@ export default function App() {
                     {ridePickupDisplayLabel}
                   </Text>
                   {hubMode && visibleRideHubs.length > 0 ? (
+                    <CarouselZone>
                     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.fuaStationScroll}>
                       {visibleRideHubs.map((hub) => {
                         const on = ridePickupStationId === hub.id;
@@ -4917,6 +5651,7 @@ export default function App() {
                         );
                       })}
                     </ScrollView>
+                    </CarouselZone>
                   ) : null}
                   <Pressable style={styles.homeDeepEntryRow} onPress={() => setHomeDeepPage('service-map')}>
                     <Text style={styles.homeDeepEntryTitle}>Hubs & destinations on map ›</Text>
@@ -4937,6 +5672,7 @@ export default function App() {
                     }}
                   />
                   <MakeLabel darkMode={themeMode === 'dark'}>Recent destinations</MakeLabel>
+                  <CarouselZone>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.makeRecentsScroll}>
                     {popularNearbyDestinations.slice(0, 5).map((dest) => {
                       const on = dest.id === selectedDestination.id;
@@ -4963,6 +5699,7 @@ export default function App() {
                       );
                     })}
                   </ScrollView>
+                  </CarouselZone>
                   <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
                     <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Selected</Text>
                     <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>{selectedDestination.name}</Text>
@@ -5006,7 +5743,7 @@ export default function App() {
                           setPhaseForService('rides', 'selecting');
                         }}
                       >
-                        <Text style={styles.rideTierIcon}>{ride.icon}</Text>
+                        <AppIcon name={ride.icon} size={28} color={theme.textPrimary} style={styles.rideTierIcon} />
                         <View style={styles.rideTierCardBody}>
                           <Text style={[styles.rideTierLabel, { color: theme.textPrimary }]}>{ride.label}</Text>
                           <Text style={[styles.rideTierBlurb, { color: theme.textSecondary }]} numberOfLines={2}>
@@ -5053,9 +5790,12 @@ export default function App() {
                   </View>
                   <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
                     <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Ride</Text>
-                    <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>
-                      {selectedRide.icon} {selectedRide.label}
-                    </Text>
+                    <View style={styles.rideReviewRideRow}>
+                      <AppIcon name={selectedRide.icon} size={18} color={theme.textPrimary} />
+                      <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>
+                        {selectedRide.label}
+                      </Text>
+                    </View>
                     <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]}>
                       {selectedRide.seats} seats · driver ~{selectedRide.minutes} min away
                     </Text>
@@ -5093,7 +5833,7 @@ export default function App() {
               ) : null}
               {rideWizardStep === 'driver_eta' ? (
                 <View style={[styles.rideStatusCard, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
-                  <Text style={styles.rideStatusEmoji}>🚗</Text>
+                  <AppIcon name="car" size={22} color={theme.textPrimary} style={styles.rideStatusEmoji} />
                   <Text style={[styles.rideStatusTitle, { color: theme.textPrimary }]}>
                     Driver ~{driverEtaMin} min away
                   </Text>
@@ -5104,7 +5844,7 @@ export default function App() {
               ) : null}
               {rideWizardStep === 'payment' ? (
                 <View style={[styles.rideStatusCard, { backgroundColor: theme.mutedSurface, borderColor: theme.border }]}>
-                  <Text style={styles.rideStatusEmoji}>💳</Text>
+                  <AppIcon name="card" size={22} color={theme.textPrimary} style={styles.rideStatusEmoji} />
                   <Text style={[styles.rideStatusTitle, { color: theme.textPrimary }]}>Pay with M-Pesa</Text>
                   <Text style={[styles.rideStatusSub, { color: theme.textSecondary }]}>
                     {estimatedFare !== null
@@ -5118,25 +5858,45 @@ export default function App() {
         }
         case 'laundry': {
           const laundryEstimateKes =
-            laundryMeasureMode === 'kg' ? laundryQuantity * LAUNDRY_KES_PER_KG : laundryItemCount * LAUNDRY_KES_PER_ITEM;
+            serverLaundryEstimate ??
+            (laundryPickupMode === 'mamafua'
+              ? mamaFuaDispatchFee +
+                selectedMamaFuaTasks.reduce((sum, id) => {
+                  const t = mamaFuaTasks.find((x) => x.id === id);
+                  return sum + (t?.priceKes ?? 0);
+                }, 0) +
+                (selectedMamaFuaTasks.includes('laundry') ? 400 + laundryQuantity * 80 : 0)
+              : laundryMeasureMode === 'kg'
+                ? laundryQuantity * LAUNDRY_KES_PER_KG
+                : laundryItemCount * LAUNDRY_KES_PER_ITEM);
           const loadSummary =
-            laundryMeasureMode === 'kg' ? `${laundryQuantity} kg` : `${laundryItemCount} items`;
-          const stationMode = laundryStationId !== null;
-          const visibleStations = nearbyStations.slice(0, 4);
-          const pickupLabel = stationMode && laundryStationId
-            ? PICKUP_STATIONS.find((s) => s.id === laundryStationId)?.name ?? 'Station'
-            : 'Your door';
-          const pickupDetail = stationMode && laundryStationId
-            ? PICKUP_STATIONS.find((s) => s.id === laundryStationId)?.subtitle ?? pickupDisplayLabel
-            : pickupDisplayLabel;
+            laundryPickupMode === 'mamafua'
+              ? selectedMamaFuaTasks.length
+                ? mamaFuaTasks
+                    .filter((t) => selectedMamaFuaTasks.includes(t.id))
+                    .map((t) => t.label)
+                    .join(', ')
+                : 'Select tasks below'
+              : laundryMeasureMode === 'kg'
+                ? `${laundryQuantity} kg`
+                : `${laundryItemCount} items`;
+          const mamafuaMode = laundryPickupMode === 'mamafua';
+          const stationMode = !mamafuaMode && laundryStationId != null;
+          const pickupLabel = mamafuaMode
+            ? 'Mama Fua visit'
+            : stationMode && laundryStationId
+              ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Station'
+              : 'Your door';
+          const pickupDetail = mamafuaMode
+            ? 'Rider delivers Mama Fua with cleaning kit'
+            : stationMode && laundryStationId
+              ? pickupStations.find((s) => s.id === laundryStationId)?.subtitle ?? pickupDisplayLabel
+              : pickupDisplayLabel;
           const bookingIndex = FUA_WIZARD_BOOKING_ORDER.indexOf(laundryWizardStep);
-          const bookingMeta = FUA_WIZARD_BOOKING[bookingIndex];
+          const stepCopy = fuaStepCopy(laundryPickupMode, laundryWizardStep);
           return (
             <>
-              {FUA_WIZARD_BOOKING_ORDER.includes(laundryWizardStep)
-                ? renderSectionHero(FUA_HERO_SLIDES, 'How Jua Fua works')
-                : null}
-              {bookingMeta ? (
+              {FUA_WIZARD_BOOKING_ORDER.includes(laundryWizardStep) ? (
                 <>
                   <Text style={[styles.rideWizardStepMeta, { color: theme.textMuted }]}>
                     Step {bookingIndex + 1} of {FUA_WIZARD_BOOKING.length}
@@ -5153,161 +5913,277 @@ export default function App() {
                       />
                     ))}
                   </View>
-                  <Text style={[styles.rideWizardTitle, { color: theme.textPrimary }]}>{bookingMeta.title}</Text>
-                  <Text style={[styles.rideWizardSubtitle, { color: theme.textSecondary }]}>{bookingMeta.subtitle}</Text>
+                  <Text style={[styles.rideWizardTitle, { color: theme.textPrimary }]}>{stepCopy.title}</Text>
+                  <Text style={[styles.rideWizardSubtitle, { color: theme.textSecondary }]}>{stepCopy.subtitle}</Text>
                 </>
               ) : null}
               {laundryWizardStep === 'pickup' ? (
                 <>
                   <View style={styles.valetSegmentTrack}>
                     <Pressable
-                      style={[styles.valetSegment, !stationMode && styles.valetSegmentActive]}
-                      onPress={() => setLaundryStationId(null)}
-                    >
-                      <Text style={[styles.valetSegmentText, !stationMode && styles.valetSegmentTextActive]}>Door</Text>
-                    </Pressable>
-                    <View style={styles.valetSegmentDivider} />
-                    <Pressable
-                      style={[styles.valetSegment, stationMode && styles.valetSegmentActive]}
-                      disabled={nearbyStations.length === 0}
+                      style={[styles.valetSegment, laundryPickupMode !== 'mamafua' && styles.valetSegmentActive]}
                       onPress={() => {
-                        if (nearbyStations.length === 0) return;
-                        setLaundryStationId(
-                          laundryStationId && nearbyStations.some((s) => s.id === laundryStationId)
-                            ? laundryStationId
-                            : nearbyStations[0].id,
-                        );
+                        setLaundryPickupMode('door');
+                        setLaundryStationId(null);
                       }}
                     >
                       <Text
                         style={[
                           styles.valetSegmentText,
-                          stationMode && styles.valetSegmentTextActive,
-                          nearbyStations.length === 0 && styles.valetSegmentTextDisabled,
+                          laundryPickupMode !== 'mamafua' && styles.valetSegmentTextActive,
                         ]}
                       >
-                        Station
-                      </Text>
-                    </Pressable>
-                  </View>
-                  {!stationMode ? (
-                    <Text style={[styles.valetAddressCompact, { color: theme.textPrimary }]} numberOfLines={2}>
-                      {pickupDisplayLabel}
-                    </Text>
-                  ) : visibleStations.length > 0 ? (
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.fuaStationScroll}>
-                      {visibleStations.map((st) => {
-                        const on = laundryStationId === st.id;
-                        return (
-                          <Pressable
-                            key={st.id}
-                            onPress={() => setLaundryStationId(st.id)}
-                            style={[
-                              styles.fuaStationChip,
-                              { borderColor: theme.border },
-                              on && styles.fuaStationChipOn,
-                            ]}
-                          >
-                            <Text style={[styles.fuaStationChipText, on && styles.fuaStationChipTextOn]} numberOfLines={1}>
-                              {st.name}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </ScrollView>
-                  ) : (
-                    <Text style={styles.juxHintMuted}>No stations in range.</Text>
-                  )}
-                  <Pressable
-                    style={styles.homeDeepEntryRow}
-                    onPress={() => {
-                      setHomeSheetStageAnimated('collapsed');
-                      setHomeDeepPage('service-map');
-                    }}
-                  >
-                    <Text style={styles.homeDeepEntryTitle}>Pickup stations on map ›</Text>
-                    <Text style={styles.homeDeepEntrySub}>Tap a station pin — your choice saves to this step</Text>
-                  </Pressable>
-                </>
-              ) : null}
-              {laundryWizardStep === 'load' ? (
-                <>
-                  <View style={styles.valetSegmentTrack}>
-                    <Pressable
-                      style={[styles.valetSegment, laundryMeasureMode === 'kg' && styles.valetSegmentActive]}
-                      onPress={() => setLaundryMeasureMode('kg')}
-                    >
-                      <Text style={[styles.valetSegmentText, laundryMeasureMode === 'kg' && styles.valetSegmentTextActive]}>
-                        By kg
+                        Wash & fold
                       </Text>
                     </Pressable>
                     <View style={styles.valetSegmentDivider} />
                     <Pressable
-                      style={[styles.valetSegment, laundryMeasureMode === 'items' && styles.valetSegmentActive]}
-                      onPress={() => setLaundryMeasureMode('items')}
+                      style={[styles.valetSegment, mamafuaMode && styles.valetSegmentActive]}
+                      onPress={() => {
+                        setLaundryPickupMode('mamafua');
+                        setLaundryStationId(null);
+                      }}
                     >
-                      <Text
-                        style={[styles.valetSegmentText, laundryMeasureMode === 'items' && styles.valetSegmentTextActive]}
-                      >
-                        By items
+                      <Text style={[styles.valetSegmentText, mamafuaMode && styles.valetSegmentTextActive]}>
+                        Mama Fua
                       </Text>
                     </Pressable>
                   </View>
-                  <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
-                    {laundryMeasureMode === 'kg'
-                      ? 'Typical load: 3–6 kg for one person · 8–12 kg for a family'
-                      : 'Count shirts, trousers, bedsheets — we will weigh at pickup if needed'}
+                      <Text style={[styles.juxHintMuted, { marginTop: 8, marginBottom: 4, color: theme.textSecondary }]}>
+                    {mamafuaMode
+                      ? 'Cleaner visits your home with equipment.'
+                      : 'We pick up clothes and return them clean.'}
                   </Text>
-                  <View style={styles.valetStepperCompact}>
-                    <Pressable
-                      style={styles.valetStepperBtn}
-                      onPress={() =>
-                        laundryMeasureMode === 'kg'
-                          ? setLaundryQuantity((q) => Math.max(1, q - 1))
-                          : setLaundryItemCount((n) => Math.max(1, n - 1))
-                      }
-                    >
-                      <Text style={styles.valetStepperBtnText}>−</Text>
-                    </Pressable>
-                    <Text style={styles.valetStepperValue}>{loadSummary}</Text>
-                    <Pressable
-                      style={styles.valetStepperBtn}
-                      onPress={() =>
-                        laundryMeasureMode === 'kg'
-                          ? setLaundryQuantity((q) => Math.min(30, q + 1))
-                          : setLaundryItemCount((n) => Math.min(45, n + 1))
-                      }
-                    >
-                      <Text style={styles.valetStepperBtnText}>+</Text>
-                    </Pressable>
-                  </View>
-                  <View style={[styles.rideWizardFareCard, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
-                    <Text style={[styles.rideWizardFareLabel, { color: theme.textSecondary }]}>Estimated total</Text>
-                    <Text style={[styles.rideWizardFareValue, { color: theme.textPrimary }]}>KES {laundryEstimateKes}</Text>
-                  </View>
+                  {mamafuaMode ? (
+                    <>
+                      <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
+                        <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Home address</Text>
+                        <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]} numberOfLines={2}>
+                          {pickupDisplayLabel}
+                        </Text>
+                        <Pressable onPress={() => void fetchCurrentLocation()} hitSlop={8}>
+                          <Text style={[styles.rideWizardReviewSub, { color: theme.primary }]}>
+                            {locationLoading ? 'Updating location…' : 'Update my location'}
+                          </Text>
+                        </Pressable>
+                      </View>
+                      <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>When works for you?</Text>
+                      <View style={styles.valetSegmentTrack}>
+                        {mamafuaWhenOptions.map((band, wi) => (
+                          <Fragment key={band.id}>
+                            {wi > 0 ? <View style={styles.valetSegmentDivider} /> : null}
+                            <Pressable
+                              style={[styles.valetSegment, valetStudioWhen === band.id && styles.valetSegmentActive]}
+                              onPress={() => setValetStudioWhen(band.id)}
+                            >
+                              <Text
+                                style={[styles.valetSegmentText, valetStudioWhen === band.id && styles.valetSegmentTextActive]}
+                              >
+                                {band.label}
+                              </Text>
+                            </Pressable>
+                          </Fragment>
+                        ))}
+                      </View>
+                      <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>Notes for Mama Fua</Text>
+                      <TextInput
+                        value={valetStudioNotes}
+                        onChangeText={setValetStudioNotes}
+                        placeholder="Gate code, floor, water tap, pets…"
+                        placeholderTextColor={theme.textMuted}
+                        multiline
+                        style={[styles.homeDeepNotes, { borderColor: theme.border, color: theme.textPrimary }]}
+                      />
+                      <Text style={[styles.juxHintMuted, { marginTop: 8 }]}>
+                        No drop-off hub — the rider brings Mama Fua and everything needed to your door.
+                      </Text>
+                    </>
+                  ) : (
+                    <>
+                      {stationMode && laundryStationId ? (
+                        <View style={[styles.rideWizardReviewRow, { borderColor: theme.border, marginTop: 8 }]}>
+                          <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Drop-off hub</Text>
+                          <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]} numberOfLines={2}>
+                            {pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Hub'}
+                          </Text>
+                          <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]} numberOfLines={2}>
+                            {pickupDetail}
+                          </Text>
+                          <Pressable onPress={() => setLaundryStationId(null)} hitSlop={8}>
+                            <Text style={[styles.rideWizardReviewSub, { color: theme.primary }]}>Use door pickup instead</Text>
+                          </Pressable>
+                        </View>
+                      ) : (
+                        <Text style={[styles.valetAddressCompact, { color: theme.textPrimary }]} numberOfLines={2}>
+                          {pickupDisplayLabel}
+                        </Text>
+                      )}
+                      <Pressable
+                        style={styles.homeDeepEntryRow}
+                        onPress={() => {
+                          setHomeSheetStageAnimated('collapsed');
+                          setHomeDeepPage('service-map');
+                        }}
+                      >
+                        <Text style={[styles.homeDeepEntryTitle, { color: theme.primary }]}>
+                          Find a drop-off hub on map ›
+                        </Text>
+                        <Text style={[styles.homeDeepEntrySub, { color: theme.textSecondary }]}>
+                          Tap a hub pin — optional for wash & fold
+                        </Text>
+                      </Pressable>
+                    </>
+                  )}
+                </>
+              ) : null}
+              {laundryWizardStep === 'load' ? (
+                <>
+                  {mamafuaMode ? (
+                    <>
+                      <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
+                        Pick on-site tasks — a rider delivers Mama Fua with equipment (KES {mamaFuaDispatchFee} dispatch).
+                      </Text>
+                      {mamaFuaTasks.map((task) => {
+                        const on = selectedMamaFuaTasks.includes(task.id);
+                        return (
+                          <Pressable
+                            key={task.id}
+                            style={[styles.listingCatRow, styles.homeDeepToggleRow, on && { borderColor: theme.primary }]}
+                            onPress={() =>
+                              setSelectedMamaFuaTasks((prev) =>
+                                on ? prev.filter((id) => id !== task.id) : [...prev, task.id],
+                              )
+                            }
+                          >
+                            <View style={styles.listingCatBody}>
+                              <Text style={styles.listingCatTitle}>{task.label}</Text>
+                              <Text style={styles.listingCatMeta}>{task.description} · KES {task.priceKes}</Text>
+                            </View>
+                            <Text style={styles.valetStationCheck}>{on ? '✓' : ''}</Text>
+                          </Pressable>
+                        );
+                      })}
+                      {selectedMamaFuaTasks.includes('laundry') ? (
+                        <View style={[styles.valetStepperCompact, { marginTop: 12 }]}>
+                          <Pressable
+                            style={styles.valetStepperBtn}
+                            onPress={() => setLaundryQuantity((q) => Math.max(1, q - 1))}
+                          >
+                            <Text style={styles.valetStepperBtnText}>−</Text>
+                          </Pressable>
+                          <Text style={styles.valetStepperValue}>{laundryQuantity} kg laundry</Text>
+                          <Pressable
+                            style={styles.valetStepperBtn}
+                            onPress={() => setLaundryQuantity((q) => Math.min(30, q + 1))}
+                          >
+                            <Text style={styles.valetStepperBtnText}>+</Text>
+                          </Pressable>
+                        </View>
+                      ) : null}
+                    </>
+                  ) : (
+                    <>
+                      <View style={styles.valetSegmentTrack}>
+                        <Pressable
+                          style={[styles.valetSegment, laundryMeasureMode === 'kg' && styles.valetSegmentActive]}
+                          onPress={() => setLaundryMeasureMode('kg')}
+                        >
+                          <Text style={[styles.valetSegmentText, laundryMeasureMode === 'kg' && styles.valetSegmentTextActive]}>
+                            By kg
+                          </Text>
+                        </Pressable>
+                        <View style={styles.valetSegmentDivider} />
+                        <Pressable
+                          style={[styles.valetSegment, laundryMeasureMode === 'items' && styles.valetSegmentActive]}
+                          onPress={() => setLaundryMeasureMode('items')}
+                        >
+                          <Text
+                            style={[styles.valetSegmentText, laundryMeasureMode === 'items' && styles.valetSegmentTextActive]}
+                          >
+                            By items
+                          </Text>
+                        </Pressable>
+                      </View>
+                      <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
+                        {laundryMeasureMode === 'kg'
+                          ? 'Typical load: 3–6 kg for one person · 8–12 kg for a family'
+                          : 'Count shirts, trousers, bedsheets — we will weigh at pickup if needed'}
+                      </Text>
+                      <View style={styles.valetStepperCompact}>
+                        <Pressable
+                          style={styles.valetStepperBtn}
+                          onPress={() =>
+                            laundryMeasureMode === 'kg'
+                              ? setLaundryQuantity((q) => Math.max(1, q - 1))
+                              : setLaundryItemCount((n) => Math.max(1, n - 1))
+                          }
+                        >
+                          <Text style={styles.valetStepperBtnText}>−</Text>
+                        </Pressable>
+                        <Text style={styles.valetStepperValue}>{loadSummary}</Text>
+                        <Pressable
+                          style={styles.valetStepperBtn}
+                          onPress={() =>
+                            laundryMeasureMode === 'kg'
+                              ? setLaundryQuantity((q) => Math.min(30, q + 1))
+                              : setLaundryItemCount((n) => Math.min(45, n + 1))
+                          }
+                        >
+                          <Text style={styles.valetStepperBtnText}>+</Text>
+                        </Pressable>
+                      </View>
+                      <View style={[styles.rideWizardFareCard, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
+                        <Text style={[styles.rideWizardFareLabel, { color: theme.textSecondary }]}>Estimated total</Text>
+                        <Text style={[styles.rideWizardFareValue, { color: theme.textPrimary }]}>KES {laundryEstimateKes}</Text>
+                      </View>
+                    </>
+                  )}
                 </>
               ) : null}
               {laundryWizardStep === 'review' ? (
                 <>
                   <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Pickup</Text>
+                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>
+                      {mamafuaMode ? 'Visit' : 'Pickup'}
+                    </Text>
                     <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>{pickupLabel}</Text>
                     <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]} numberOfLines={2}>
                       {pickupDetail}
                     </Text>
                   </View>
+                  {mamafuaMode ? (
+                    <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
+                      <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>When</Text>
+                      <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>
+                        {fuaWhenLabel(valetStudioWhen, mamafuaWhenOptions)}
+                      </Text>
+                      {valetStudioNotes.trim() ? (
+                        <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]} numberOfLines={2}>
+                          {valetStudioNotes.trim()}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ) : null}
                   <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Load</Text>
+                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>
+                      {mamafuaMode ? 'Tasks' : 'Load'}
+                    </Text>
                     <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>{loadSummary}</Text>
                     <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]}>
-                      {laundryMeasureMode === 'kg' ? 'Charged per kg' : 'Charged per item'} · washed, folded & delivered
+                      {mamafuaMode
+                        ? `Rider dispatch KES ${mamaFuaDispatchFee} + selected jobs`
+                        : laundryMeasureMode === 'kg'
+                          ? 'Charged per kg · washed, folded & delivered'
+                          : 'Charged per item · washed, folded & delivered'}
                     </Text>
                   </View>
                   <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
                     <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>ETA</Text>
                     <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>30–45 min</Text>
                     <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]}>
-                      Mama fua picks up, washes at a verified station, and returns to you
+                      {mamafuaMode
+                        ? 'Rider delivers Mama Fua with kit — she works at your home'
+                        : 'Mama fua picks up, washes at a verified station, and returns to you'}
                     </Text>
                   </View>
                   <View style={[styles.rideWizardFareCard, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
@@ -5345,89 +6221,89 @@ export default function App() {
                   );
                 })}
               </View>
-              {renderSectionHero(
-                isRental ? STAYS_RENTAL_HERO_SLIDES : STAYS_BNB_HERO_SLIDES,
-                isRental ? 'How rentals work' : 'How BnBs work',
-              )}
               <Text style={styles.valetSheetTag}>Kisumu pilot · {currentCounty}</Text>
               <Text style={styles.valetSheetLead}>
-                {isRental
-                  ? stayCount
-                    ? `Vacant rentals within ${staysRadiusKm} km. Exact pins unlock with subscription.`
-                    : `No rentals in ${staysRadiusKm} km — widen radius or browse all.`
-                  : stayCount
-                    ? `Short stays near you — book to reveal the full address.`
-                    : `Nothing listed in ${currentCounty} yet.`}
+                {dataLoading
+                  ? 'Loading listings from server…'
+                  : isRental
+                    ? stayCount
+                      ? `Vacant rentals within ${staysRadiusKm} km. Exact pins unlock with subscription.`
+                      : `No rentals in ${staysRadiusKm} km — widen radius or browse all.`
+                    : stayCount
+                      ? `Short stays near you — book to reveal the full address.`
+                      : `Nothing listed in ${currentCounty} yet.`}
               </Text>
-              <Text style={[styles.juxSectionLabel, styles.valetSectionLabelCompact]}>Radius</Text>
-              <View style={styles.staysRadiusRow}>
-                {STAYS_RADIUS_OPTIONS.map((km) => {
-                  const on = staysRadiusKm === km;
-                  return (
-                    <Pressable
-                      key={km}
-                      style={[styles.staysRadiusChip, on && styles.staysRadiusChipOn]}
-                      onPress={() => setStaysRadiusKm(km)}
-                    >
-                      <Text style={[styles.staysRadiusChipText, on && styles.staysRadiusChipTextOn]}>{km} km</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-              <View style={styles.juxSectionRow}>
-                <Text style={styles.juxSectionLabel}>{isRental ? 'Vacant nearby' : 'Stays nearby'}</Text>
-                <View style={styles.staysSectionActions}>
-                  <View style={styles.listingsViewToggle}>
-                    <Pressable
-                      style={[styles.listingsViewChip, staysSheetViewMode === 'list' && styles.listingsViewChipOn]}
-                      onPress={() => setStaysSheetViewMode('list')}
-                    >
-                      <Text
-                        style={[
-                          styles.listingsViewChipText,
-                          staysSheetViewMode === 'list' && styles.listingsViewChipTextOn,
-                        ]}
-                      >
-                        List
-                      </Text>
-                    </Pressable>
-                    <Pressable
-                      style={[styles.listingsViewChip, staysSheetViewMode === 'map' && styles.listingsViewChipOn]}
-                      onPress={() => {
-                        setStaysSheetViewMode('map');
-                        if (!currentCoords) void fetchCurrentLocation();
-                      }}
-                    >
-                      <Text
-                        style={[
-                          styles.listingsViewChipText,
-                          staysSheetViewMode === 'map' && styles.listingsViewChipTextOn,
-                        ]}
-                      >
-                        Map
-                      </Text>
-                    </Pressable>
-                  </View>
-                  <Pressable
-                    onPress={() => {
-                      setListingCatalog(isRental ? 'house' : 'bnb');
-                      setListingRadiusKm(staysRadiusKm);
-                      setHomeDeepPage('listings');
-                      setHomeSheetStageAnimated('full');
-                    }}
-                    hitSlop={8}
+              <Text style={[styles.juxSectionLabel, styles.valetSectionLabelCompact]}>
+                {isRental ? 'Vacant nearby' : 'Stays nearby'}
+                {!dataLoading && listingsLoaded ? ` · ${staysRadiusKm} km` : ''}
+              </Text>
+              <View style={styles.staysSectionActionsRow}>
+                <Pressable onPress={() => setStaysSheetViewMode('list')} hitSlop={6}>
+                  <Text
+                    style={[
+                      styles.staysViewLink,
+                      staysSheetViewMode === 'list' && styles.staysViewLinkOn,
+                    ]}
                   >
-                    <Text style={styles.juxSeeAll}>See all</Text>
-                  </Pressable>
-                </View>
+                    List
+                  </Text>
+                </Pressable>
+                <Text style={styles.staysViewDot}>·</Text>
+                <Pressable
+                  onPress={() => {
+                    setStaysSheetViewMode('map');
+                    if (!currentCoords) void fetchCurrentLocation();
+                  }}
+                  hitSlop={6}
+                >
+                  <Text
+                    style={[
+                      styles.staysViewLink,
+                      staysSheetViewMode === 'map' && styles.staysViewLinkOn,
+                    ]}
+                  >
+                    Map
+                  </Text>
+                </Pressable>
+                <View style={{ flex: 1 }} />
+                <Pressable
+                  onPress={() => {
+                    const opts = [...STAYS_RADIUS_OPTIONS];
+                    const i = opts.indexOf(staysRadiusKm);
+                    setStaysRadiusKm(opts[(i >= 0 ? i + 1 : 0) % opts.length]);
+                  }}
+                  hitSlop={8}
+                >
+                  <Text style={styles.juxSeeAll}>Radius</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    setListingCatalog(isRental ? 'house' : 'bnb');
+                    setListingRadiusKm(staysRadiusKm);
+                    setHomeDeepPage('listings');
+                    setHomeSheetStageAnimated('full');
+                  }}
+                  hitSlop={8}
+                >
+                  <Text style={styles.juxSeeAll}>See all</Text>
+                </Pressable>
               </View>
               {staysSheetViewMode === 'map' ? (
                 <>
                   <Text style={styles.homeDeepCount}>
-                    {stayCount} on map within {staysRadiusKm} km · tap a pin for details
+                    {dataLoading
+                      ? 'Loading listings…'
+                      : `${stayCount} on map within ${staysRadiusKm} km · tap a pin for details`}
                   </Text>
                   <View style={[styles.staysHomeMapBand, { height: staysMapHeight }]}>
-                    {staysHomeMapHtml ? (
+                    {dataLoading ? (
+                      <View style={[styles.serviceMapFallback, { justifyContent: 'center' }]}>
+                        <ActivityIndicator size="small" color={theme.primary} />
+                        <Text style={[styles.serviceMapFallbackText, { marginTop: 10 }]}>
+                          Loading listings from server…
+                        </Text>
+                      </View>
+                    ) : staysHomeMapHtml ? (
                       <WebView
                         ref={staysHomeMapWebViewRef}
                         source={{ html: staysHomeMapHtml }}
@@ -5469,7 +6345,20 @@ export default function App() {
                     </View>
                   </View>
                 </>
+              ) : dataLoading ? (
+                <View style={styles.listingsLoadingRow}>
+                  <ActivityIndicator size="small" color={theme.primary} />
+                  <Text style={[styles.juxHintMuted, { marginLeft: 10 }]}>Loading listings from server…</Text>
+                </View>
+              ) : dataError ? (
+                <View style={styles.listingsLoadingRow}>
+                  <Text style={[styles.juxHintMuted, { flex: 1 }]}>{dataError}</Text>
+                  <Pressable onPress={() => void refreshAppData()} hitSlop={8}>
+                    <Text style={{ color: theme.primary, fontWeight: '600' }}>Retry</Text>
+                  </Pressable>
+                </View>
               ) : stayRows.length > 0 ? (
+                <CarouselZone>
                 <ScrollView
                   horizontal
                   showsHorizontalScrollIndicator={false}
@@ -5532,6 +6421,7 @@ export default function App() {
                         );
                       })}
                 </ScrollView>
+                </CarouselZone>
               ) : (
                 <Text style={styles.juxHintMuted}>
                   {isRental ? 'No rentals in range — widen radius.' : 'No stays in this area yet.'}
@@ -5559,7 +6449,7 @@ export default function App() {
               ) : null}
               {isRental && focusedHouse ? (
                 <View style={styles.juxListingDetail}>
-                  <View style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
+                  <CarouselZone style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
                     <FlatList
                       style={{ width: listingCarouselW }}
                       data={focusedHouse.gallery}
@@ -5585,7 +6475,7 @@ export default function App() {
                         index,
                       })}
                     />
-                  </View>
+                  </CarouselZone>
                   <View style={styles.juxListingDetailBody}>
                     <View style={styles.juxListingTitleRow}>
                       <Text style={styles.juxListingTitle}>{focusedHouse.title}</Text>
@@ -5606,6 +6496,7 @@ export default function App() {
                         ))
                       : null}
                     {!compactDetail ? (
+                      <CarouselZone>
                       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.juxChipRow}>
                         {focusedHouse.amenities.map((tag) => (
                           <View key={tag} style={styles.juxChip}>
@@ -5613,6 +6504,7 @@ export default function App() {
                           </View>
                         ))}
                       </ScrollView>
+                      </CarouselZone>
                     ) : null}
                     <View style={styles.valetListingFooterCompact}>
                       {rentalSubscribed ? (
@@ -5660,7 +6552,7 @@ export default function App() {
                 </View>
               ) : !isRental && focusedBnb ? (
                 <View style={styles.juxListingDetail}>
-                  <View style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
+                  <CarouselZone style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
                     <FlatList
                       style={{ width: listingCarouselW }}
                       data={focusedBnb.gallery}
@@ -5686,7 +6578,7 @@ export default function App() {
                         index,
                       })}
                     />
-                  </View>
+                  </CarouselZone>
                   <View style={styles.juxListingDetailBody}>
                     <View style={styles.juxListingTitleRow}>
                       <Text style={styles.juxListingTitle}>{focusedBnb.title}</Text>
@@ -5705,6 +6597,7 @@ export default function App() {
                         ))
                       : null}
                     {!compactDetail ? (
+                      <CarouselZone>
                       <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.juxChipRow}>
                         {focusedBnb.amenities.slice(0, 6).map((tag) => (
                           <View key={tag} style={styles.juxChip}>
@@ -5712,6 +6605,7 @@ export default function App() {
                           </View>
                         ))}
                       </ScrollView>
+                      </CarouselZone>
                     ) : null}
                     <View style={styles.valetListingFooterCompact}>
                       <Pressable
@@ -5737,20 +6631,11 @@ export default function App() {
                       </Pressable>
                       <Pressable
                         onPress={() => {
-                          if (!focusedBnb.has3dTour) return;
-                          setTourSheetTarget({ kind: 'bnb', id: focusedBnb.id });
+                          void submitListingRequest('tour', focusedBnb.id, focusedBnb.title, 'bnb');
                         }}
-                        disabled={!focusedBnb.has3dTour}
                         style={styles.textRowActionHit}
                       >
-                        <Text
-                          style={[
-                            styles.textRowActionMuted,
-                            !focusedBnb.has3dTour && styles.valetListingSecondaryDisabled,
-                          ]}
-                        >
-                          3D tour
-                        </Text>
+                        <Text style={styles.textRowActionMuted}>Request tour</Text>
                       </Pressable>
                     </View>
                   </View>
@@ -5770,19 +6655,28 @@ export default function App() {
 
     const laundryEstimateFooter =
       activeService === 'laundry'
-        ? laundryMeasureMode === 'kg'
-          ? laundryQuantity * LAUNDRY_KES_PER_KG
-          : laundryItemCount * LAUNDRY_KES_PER_ITEM
+        ? serverLaundryEstimate ??
+          (laundryPickupMode === 'mamafua'
+            ? mamaFuaDispatchFee +
+              selectedMamaFuaTasks.reduce((sum, id) => sum + (mamaFuaTasks.find((t) => t.id === id)?.priceKes ?? 0), 0)
+            : laundryMeasureMode === 'kg'
+              ? laundryQuantity * LAUNDRY_KES_PER_KG
+              : laundryItemCount * LAUNDRY_KES_PER_ITEM)
         : 0;
     const laundryLoadFooter =
       activeService === 'laundry'
-        ? laundryMeasureMode === 'kg'
-          ? `${laundryQuantity} kg`
-          : `${laundryItemCount} items`
+        ? laundryPickupMode === 'mamafua'
+          ? selectedMamaFuaTasks.length
+            ? `${selectedMamaFuaTasks.length} task(s)`
+            : 'No tasks'
+          : laundryMeasureMode === 'kg'
+            ? `${laundryQuantity} kg`
+            : `${laundryItemCount} items`
         : '';
 
     const sheetFooter = (() => {
       if (activeTab !== 'home' || isComingSoonSegment) return null;
+      if (activeSegment === 'home') return null;
       if (isActiveTripMode) {
         return (
           <SheetStickyFooter
@@ -5797,31 +6691,58 @@ export default function App() {
       if (activeService === 'laundry' && !isActiveTripMode) {
         const wizardBack = prevFuaWizardStep(laundryWizardStep);
         const advanceFuaWizard = () => {
+          if (laundryWizardStep === 'load' && laundryPickupMode === 'mamafua' && selectedMamaFuaTasks.length === 0) {
+            setBookingMessage('Select at least one task for Mama Fua');
+            return;
+          }
           const next = nextFuaWizardStep(laundryWizardStep);
           setLaundryWizardStep(next);
           setPhaseForService('laundry', 'selecting');
           setHomeSheetStageAnimated('mid');
         };
-        const confirmLaundry = () => {
-          const station = laundryStationId ? PICKUP_STATIONS.find((s) => s.id === laundryStationId) : null;
-          const where = station ? station.name : 'Your location';
-          const request = `Jua Fua • ${where} • ${laundryLoadFooter} • KES ${laundryEstimateFooter}`;
-          setTripFeed((prev) => [request, ...prev].slice(0, 10));
-          setBookingMessage(request);
-          setActiveTripInfo({
-            service: 'laundry',
-            title: 'Fua pickup',
-            subtitle: where,
-            eta: '30–45 min',
-          });
-          setPhaseForService('laundry', 'active_trip');
-          setHomeSheetStageAnimated('collapsed');
+        const confirmLaundry = async () => {
+          if (orderSubmitting) return;
+          if (!isAuthed) {
+            setBookingMessage('Sign in to place a Fua order');
+            return;
+          }
+          if (laundryPickupMode === 'mamafua' && selectedMamaFuaTasks.length === 0) {
+            setBookingMessage('Select at least one Mama Fua task');
+            return;
+          }
+          setOrderSubmitting(true);
+          try {
+            const order = await createLaundryOrder(buildLaundryOrderBody());
+            const where =
+              laundryPickupMode === 'mamafua'
+                ? 'Mama Fua visit'
+                : laundryStationId
+                  ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Station'
+                  : 'Your location';
+            const request = `Jua Fua · ${order.pickupLabel || where} · ${order.loadLabel} · KES ${order.totalKes}`;
+            setTripFeed((prev) => [request, ...prev].slice(0, 10));
+            const shortMsg =
+              order.serviceType === 'mamafua'
+                ? 'Mama Fua visit submitted — check Trips'
+                : 'Fua request submitted — check Trips';
+            flashBookingNotice(shortMsg, { goTrips: true });
+            setLaundryWizardStep('pickup');
+            setPhaseForService('laundry', 'selecting');
+            setHomeSheetStageAnimated('mid');
+            void reloadLaundryOrders();
+          } catch (err) {
+            setBookingMessage(err instanceof Error ? err.message : 'Could not create order — sign in and try again');
+          } finally {
+            setOrderSubmitting(false);
+          }
         };
         if (laundryWizardStep === 'pickup') {
           const pickupSublabel =
-            laundryStationId != null
-              ? PICKUP_STATIONS.find((s) => s.id === laundryStationId)?.name ?? 'Station'
-              : 'Door pickup';
+            laundryPickupMode === 'mamafua'
+              ? `${fuaWhenLabel(valetStudioWhen, mamafuaWhenOptions)} · ${pickupDisplayLabel}`
+              : laundryStationId != null
+                ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Hub'
+                : 'Door pickup';
           return (
             <SheetStickyFooter
               label="Continue"
@@ -5845,11 +6766,13 @@ export default function App() {
         if (laundryWizardStep === 'review') {
           return (
             <SheetStickyFooter
-              label="Confirm request"
+              label={orderSubmitting ? 'Submitting…' : 'Confirm request'}
+              tone="primary"
               sublabel={`KES ${laundryEstimateFooter} · ${laundryLoadFooter}`}
+              disabled={orderSubmitting}
               darkMode={themeMode === 'dark'}
               onBack={() => wizardBack && setLaundryWizardStep(wizardBack)}
-              onPress={confirmLaundry}
+              onPress={() => void confirmLaundry()}
             />
           );
         }
@@ -5858,7 +6781,7 @@ export default function App() {
       if (activeService === 'rides' && !isActiveTripMode) {
         const pickupLabel =
           ridePickupMode === 'station' && ridePickupStationId
-            ? PICKUP_STATIONS.find((s) => s.id === ridePickupStationId)?.name ?? 'Pickup hub'
+            ? pickupStations.find((s) => s.id === ridePickupStationId)?.name ?? 'Pickup hub'
             : 'Your location';
         const wizardBack = prevRideWizardStep(rideWizardStep);
         const advanceWizard = () => {
@@ -5894,7 +6817,7 @@ export default function App() {
           return (
             <SheetStickyFooter
               label="Continue"
-              sublabel={`${selectedRide.icon} ${selectedRide.label}`}
+              sublabel={selectedRide.label}
               darkMode={themeMode === 'dark'}
               onBack={() => wizardBack && setRideWizardStep(wizardBack)}
               onPress={advanceWizard}
@@ -5905,6 +6828,7 @@ export default function App() {
           return (
             <SheetStickyFooter
               label={estimatedFare !== null ? `Request ride · KES ${estimatedFare}` : 'Request ride'}
+              tone="primary"
               sublabel={`${pickupLabel} → ${selectedDestination.name}`}
               darkMode={themeMode === 'dark'}
               onBack={() => wizardBack && setRideWizardStep(wizardBack)}
@@ -5938,6 +6862,7 @@ export default function App() {
           return (
             <SheetStickyFooter
               label={estimatedFare !== null ? `Pay with M-Pesa · KES ${estimatedFare}` : 'Pay with M-Pesa'}
+              tone="primary"
               sublabel={`${selectedDestination.name} · ${selectedRide.label}`}
               darkMode={themeMode === 'dark'}
               onPress={() => {
@@ -5949,17 +6874,10 @@ export default function App() {
                 if (ridePlannerStop.trim()) bits.push(`via ${ridePlannerStop.trim()}`);
                 const tripSummary = bits.join(' · ');
                 setTripFeed((previous) => [tripSummary, ...previous].slice(0, 10));
-                setBookingMessage(`Paid · ${tripSummary}`);
-                setActiveTripInfo({
-                  service: 'rides',
-                  title: selectedRide.label,
-                  subtitle: selectedDestination.name,
-                  eta: routeDurationMin != null ? `${routeDurationMin} min` : '—',
-                });
-                setPhaseForService('rides', 'active_trip');
-                setRideWizardStep('on_trip');
-                setTripStarted(true);
-                setHomeSheetStageAnimated('collapsed');
+                flashBookingNotice('Ride confirmed — check Trips', { goTrips: true });
+                setPhaseForService('rides', 'idle');
+                setRideWizardStep('pickup');
+                setHomeSheetStageAnimated('mid');
               }}
             />
           );
@@ -5983,28 +6901,29 @@ export default function App() {
           if (!rentalSubscribed) {
             return (
               <SheetStickyFooter
-                label="Subscribe to unlock"
-                sublabel="Weekly · KES 499 · exact pins + landlord contact"
+                label={requestSubmitting ? 'Submitting…' : 'Subscribe to unlock'}
+                tone="primary"
+                sublabel={
+                  subscriptionPlans[0]
+                    ? `${subscriptionPlans[0].label} · KES ${subscriptionPlans[0].priceKes} · request viewings`
+                    : 'Weekly plan · request viewings'
+                }
+                disabled={requestSubmitting}
                 darkMode={themeMode === 'dark'}
-                onPress={() => {
-                  setRentalSubscribed(true);
-                  setBookingMessage('Saka Keja weekly unlock active — exact locations and contact unlocked.');
-                }}
+                onPress={() => void subscribeToKeja()}
               />
             );
           }
           return (
             <SheetStickyFooter
-              label="Request viewing"
+              label={requestSubmitting ? 'Submitting…' : 'Request viewing'}
+              tone="primary"
               sublabel={`${focusedHouse.title} · ${focusedHouse.price}`}
+              disabled={requestSubmitting}
               darkMode={themeMode === 'dark'}
-              onPress={() => {
-                const request = `House viewing request • ${focusedHouse.title} • ${focusedHouse.price}`;
-                setTripFeed((prev) => [request, ...prev].slice(0, 10));
-                setBookingMessage(request);
-                setPhaseForService('bnbs', 'confirmed');
-                setActiveTab('trips');
-              }}
+              onPress={() =>
+                void submitListingRequest('viewing', focusedHouse.id, focusedHouse.title, 'house')
+              }
             />
           );
         }
@@ -6021,16 +6940,12 @@ export default function App() {
         }
         return (
           <SheetStickyFooter
-            label="Reserve stay"
+            label={requestSubmitting ? 'Submitting…' : 'Reserve stay'}
+            tone="primary"
             sublabel={`${focusedBnb.title} · ${focusedBnb.price}`}
+            disabled={requestSubmitting}
             darkMode={themeMode === 'dark'}
-            onPress={() => {
-              const booking = `BnB booked • ${focusedBnb.title} • ${focusedBnb.price}`;
-              setTripFeed((prev) => [booking, ...prev].slice(0, 10));
-              setBookingMessage(booking);
-              setPhaseForService('bnbs', 'confirmed');
-              setActiveTab('trips');
-            }}
+            onPress={() => void submitListingRequest('stay', focusedBnb.id, focusedBnb.title, 'bnb')}
           />
         );
       }
@@ -6044,19 +6959,14 @@ export default function App() {
           const b = listingDetailEntity as BnbListing;
           return (
             <SheetStickyFooter
-              label="Reserve stay"
+              label={requestSubmitting ? 'Submitting…' : 'Reserve stay'}
               sublabel={`${b.title} · ${b.price}`}
+              disabled={requestSubmitting}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
-              onPress={() => {
-                const booking = `BnB booked • ${b.title} • ${b.price}`;
-                setTripFeed((prev) => [booking, ...prev].slice(0, 10));
-                setBookingMessage(booking);
-                setPhaseForService('bnbs', 'confirmed');
-                setHomeDeepPage(null);
-                setListingDetail(null);
-                setActiveTab('trips');
-              }}
+              onPress={() =>
+                void submitListingRequest('stay', b.id, b.title, 'bnb', { closeDeepPage: true })
+              }
             />
           );
         }
@@ -6064,32 +6974,29 @@ export default function App() {
         if (!rentalSubscribed) {
           return (
             <SheetStickyFooter
-              label="Subscribe to unlock"
-              sublabel="Weekly · KES 499 · then request viewing"
+              label={requestSubmitting ? 'Submitting…' : 'Subscribe to unlock'}
+              sublabel={
+                subscriptionPlans[0]
+                  ? `${subscriptionPlans[0].label} · KES ${subscriptionPlans[0].priceKes}`
+                  : 'Weekly · then request viewing'
+              }
+              disabled={requestSubmitting}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
-              onPress={() => {
-                setRentalSubscribed(true);
-                setBookingMessage('Saka Keja weekly unlock active — you can request viewings.');
-              }}
+              onPress={() => void subscribeToKeja()}
             />
           );
         }
         return (
           <SheetStickyFooter
-            label="Request viewing"
+            label={requestSubmitting ? 'Submitting…' : 'Request viewing'}
             sublabel={`${h.title} · ${h.price}`}
+            disabled={requestSubmitting}
             darkMode={themeMode === 'dark'}
             style={{ paddingBottom: insets.bottom + 8 }}
-            onPress={() => {
-              const request = `House viewing request • ${h.title} • ${h.price}`;
-              setTripFeed((prev) => [request, ...prev].slice(0, 10));
-              setBookingMessage(request);
-              setPhaseForService('bnbs', 'confirmed');
-              setHomeDeepPage(null);
-              setListingDetail(null);
-              setActiveTab('trips');
-            }}
+            onPress={() =>
+              void submitListingRequest('viewing', h.id, h.title, 'house', { closeDeepPage: true })
+            }
           />
         );
       }
@@ -6164,13 +7071,28 @@ export default function App() {
         );
       }
       if (homeDeepPage === 'service-map') {
+        if (activeService === 'laundry' && laundryPickupMode === 'mamafua') {
+          return (
+            <SheetStickyFooter
+              label="Back to Mama Fua booking"
+              sublabel={currentLocationLabel}
+              darkMode={themeMode === 'dark'}
+              style={{ paddingBottom: insets.bottom + 8 }}
+              onPress={() => {
+                setHomeDeepPage(null);
+                setLaundryWizardStep('pickup');
+                setHomeSheetStageAnimated('mid');
+              }}
+            />
+          );
+        }
         const laundryStation =
           activeService === 'laundry' && laundryStationId
-            ? PICKUP_STATIONS.find((s) => s.id === laundryStationId)
+            ? pickupStations.find((s) => s.id === laundryStationId)
             : null;
         const rideHub =
           activeService === 'rides' && ridePickupStationId
-            ? PICKUP_STATIONS.find((s) => s.id === ridePickupStationId)
+            ? pickupStations.find((s) => s.id === ridePickupStationId)
             : null;
         if (laundryStation && activeService === 'laundry') {
           return (
@@ -6257,7 +7179,9 @@ export default function App() {
             label="Back to wizard"
             sublabel={
               activeService === 'laundry'
-                ? 'Green pin = you · orange = station — tap a pin to select'
+                ? laundryPickupMode === 'mamafua'
+                  ? 'Green pin = your home — confirm you are in the right place'
+                  : 'Green pin = you · orange = hub — tap a pin to select'
                 : activeService === 'rides' && rideWizardStep === 'destination'
                   ? 'Tap a gold pin for your destination'
                   : activeService === 'rides'
@@ -6282,7 +7206,11 @@ export default function App() {
 
     return (
       <>
-      <View style={[styles.juxShell, { backgroundColor: theme.canvas }]}>
+      <ServiceSwipeProvider>
+      <View
+        style={[styles.juxShell, { backgroundColor: theme.canvas }]}
+        {...serviceSwipePan.panHandlers}
+      >
         {showMapBand ? (
           <View style={[styles.juxMapBand, { height: mapBandHeight }]} pointerEvents="box-none" collapsable={false}>
             {mapCfg.html ? (
@@ -6372,13 +7300,16 @@ export default function App() {
 
         {showServiceSegment ? (
           <View style={[styles.serviceSegmentInChrome, { paddingHorizontal: gutter }]}>
+            <CarouselZone>
             <ERServiceSegment
               tabs={SERVICE_SEGMENTS}
               active={activeSegment}
               onChange={(key) => {
                 setActiveSegment(key);
-                if (key === 'laundry' || key === 'bnbs' || key === 'rides') {
+                if (key === 'laundry' || key === 'bnbs') {
                   setActiveService(key);
+                  setHomeSheetStageAnimated('mid');
+                } else if (key === 'home') {
                   setHomeSheetStageAnimated('mid');
                 }
               }}
@@ -6389,6 +7320,7 @@ export default function App() {
               fontSize={windowWidth < 360 ? 9 : windowWidth < 400 ? 10 : 11}
               darkMode={themeMode === 'dark'}
             />
+            </CarouselZone>
           </View>
         ) : null}
 
@@ -6420,57 +7352,98 @@ export default function App() {
               </Pressable>
             </View>
           ) : null}
-          {!!bookingMessage ? <Text style={styles.juxToast}>{bookingMessage}</Text> : null}
-          {tripStarted ? <Text style={styles.juxToast}>Trip is live.</Text> : null}
+          {!!bookingMessage ? (
+            <Pressable
+              style={styles.juxNoticePill}
+              onPress={() => {
+                if (/check Trips/i.test(bookingMessage)) setActiveTab('trips');
+                setBookingMessage('');
+              }}
+            >
+              <Text style={styles.juxNoticePillText} numberOfLines={1}>
+                {bookingMessage}
+              </Text>
+            </Pressable>
+          ) : null}
           {locationError ? (
             <Pressable onPress={fetchCurrentLocation} style={styles.locationErrorBanner}>
               <Text style={styles.juxErrorInline}>{locationError}</Text>
               <Text style={styles.locationErrorRetry}>Tap to retry</Text>
             </Pressable>
           ) : null}
-          {isActiveTripMode && onHomeTab && homeSheetStage === 'collapsed' ? (
-            <View style={styles.activeTripBarRow}>
-              <Pressable style={styles.activeTripBar} onPress={() => setHomeSheetStageAnimated('mid')}>
-                <View style={styles.activeTripBarMain}>
-                  <Text style={styles.activeTripBarTitle}>{activeTripInfo?.title ?? 'Trip in progress'}</Text>
-                  <Text style={styles.activeTripBarSub} numberOfLines={1}>
-                    {activeTripInfo?.subtitle ?? 'Tap for details'}
-                  </Text>
-                </View>
-                <View style={styles.activeTripBarEta}>
-                  <Text style={styles.activeTripBarEtaValue}>{activeTripInfo?.eta ?? '—'}</Text>
-                  <Text style={styles.activeTripBarEtaLabel}>ETA</Text>
-                </View>
-              </Pressable>
-              <Pressable style={styles.activeTripCancel} onPress={cancelLiveTrip} hitSlop={8}>
-                <Text style={styles.activeTripCancelText}>Cancel</Text>
-              </Pressable>
+          {showPullRefreshStrip ? (
+            <View
+              style={[
+                styles.pullRefreshStrip,
+                { opacity: pullRefreshing ? 1 : 0.35 + pullProgress * 0.65 },
+              ]}
+              pointerEvents="none"
+            >
+              {pullRefreshing ? (
+                <ActivityIndicator size="small" color={theme.primary} />
+              ) : (
+                <Text
+                  style={[
+                    styles.pullRefreshGlyph,
+                    { transform: [{ rotate: `${pullProgress * 360}deg` }] },
+                  ]}
+                >
+                  ↻
+                </Text>
+              )}
+              <Text style={styles.pullRefreshHint}>{pullRefreshLabel}</Text>
             </View>
-          ) : (
-            <>
-              <ScrollView
-                style={styles.juxSheetScroll}
-                contentContainerStyle={[
-                  styles.juxSheetScrollContent,
-                  { paddingHorizontal: gutter, paddingBottom: sheetFooter ? 4 : tabBarBottomPad + 8 },
-                ]}
-                showsVerticalScrollIndicator={false}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-                removeClippedSubviews={false}
-                keyboardDismissMode="on-drag"
-                onScrollBeginDrag={() => {
-                  Keyboard.dismiss();
-                  setDestinationSuggestions([]);
-                }}
-                directionalLockEnabled
-                overScrollMode="never"
-              >
-                {sheetInner}
-              </ScrollView>
-              {sheetFooter}
-            </>
-          )}
+          ) : null}
+          <View style={styles.juxSheetScrollHost}>
+            <View style={styles.juxSheetScrollClip}>
+          <ScrollView
+            style={styles.juxSheetScroll}
+            contentContainerStyle={[
+              styles.juxSheetScrollContent,
+              {
+                paddingHorizontal: gutter,
+                paddingBottom: sheetFooter ? 20 : tabBarBottomPad + 8,
+              },
+            ]}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            removeClippedSubviews={false}
+            keyboardDismissMode="on-drag"
+            bounces
+            alwaysBounceVertical
+            scrollEventThrottle={16}
+            onScroll={onSheetScroll}
+            onScrollEndDrag={onSheetScrollEndDrag}
+            onContentSizeChange={onSheetContentSizeChange}
+            onLayout={onSheetLayout}
+            refreshControl={
+              <RefreshControl
+                refreshing={pullRefreshing}
+                onRefresh={() => void handlePullRefresh()}
+                tintColor={theme.primary}
+                colors={[theme.primary]}
+                progressBackgroundColor={theme.surface}
+                progressViewOffset={Platform.OS === 'android' ? 48 : 0}
+              />
+            }
+            onScrollBeginDrag={() => {
+              Keyboard.dismiss();
+              setDestinationSuggestions([]);
+            }}
+            directionalLockEnabled
+          >
+            {sheetInner}
+          </ScrollView>
+          {sheetFooter && sheetHasMoreBelow ? (
+            <View style={[styles.sheetScrollCueWrap, { borderTopColor: theme.border }]} pointerEvents="none">
+              <View style={[styles.sheetScrollCueFade, { backgroundColor: theme.sheet }]} />
+              <Text style={[styles.sheetScrollCueText, { color: theme.textSecondary }]}>Scroll for more ↓</Text>
+            </View>
+          ) : null}
+            </View>
+          {sheetFooter}
+          </View>
         </View>
 
         {showMainTabBar ? (
@@ -6479,7 +7452,10 @@ export default function App() {
             active={activeTab}
             onChange={(key) => {
               setActiveTab(key);
-              if (key === 'home') setHomeSheetStageAnimated('mid');
+              if (key === 'home') {
+                setHomeSheetStageAnimated('mid');
+                setActiveSegment('home');
+              }
             }}
             bottomInset={tabBarBottomPad}
             horizontalPad={gutter}
@@ -6517,33 +7493,21 @@ export default function App() {
                 ) : homeDeepPage === 'listings' ? (
                   <View style={styles.listingsHeaderRow}>
                     <Text style={styles.homeDeepMapTitle}>Listings</Text>
-                    <View style={styles.listingsViewToggle}>
-                      <Pressable
-                        style={[styles.listingsViewChip, listingsViewMode === 'list' && styles.listingsViewChipOn]}
-                        onPress={() => setListingsViewMode('list')}
-                      >
-                        <Text
-                          style={[
-                            styles.listingsViewChipText,
-                            listingsViewMode === 'list' && styles.listingsViewChipTextOn,
-                          ]}
-                        >
+                    <View style={styles.staysSectionActionsRow}>
+                      <Pressable onPress={() => setListingsViewMode('list')} hitSlop={6}>
+                        <Text style={[styles.staysViewLink, listingsViewMode === 'list' && styles.staysViewLinkOn]}>
                           List
                         </Text>
                       </Pressable>
+                      <Text style={styles.staysViewDot}>·</Text>
                       <Pressable
-                        style={[styles.listingsViewChip, listingsViewMode === 'map' && styles.listingsViewChipOn]}
                         onPress={() => {
                           setListingsViewMode('map');
                           if (!currentCoords) void fetchCurrentLocation();
                         }}
+                        hitSlop={6}
                       >
-                        <Text
-                          style={[
-                            styles.listingsViewChipText,
-                            listingsViewMode === 'map' && styles.listingsViewChipTextOn,
-                          ]}
-                        >
+                        <Text style={[styles.staysViewLink, listingsViewMode === 'map' && styles.staysViewLinkOn]}>
                           Map
                         </Text>
                       </Pressable>
@@ -6588,30 +7552,38 @@ export default function App() {
                           : 'Tap ◎ to show your location'}
                     </Text>
                   </View>
-                  {activeService === 'laundry' ||
-                  (activeService === 'rides' && rideWizardStep === 'pickup') ? (
+                  {activeService === 'laundry' && laundryPickupMode !== 'mamafua' ? (
                     <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 48 }]}>
                       <View style={styles.serviceMapLegendRow}>
                         <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
                         <Text style={styles.serviceMapLegendText}>You are here</Text>
                       </View>
                       <View style={styles.serviceMapLegendRow}>
-                        <View
-                          style={[
-                            styles.serviceMapLegendDot,
-                            { backgroundColor: activeService === 'laundry' ? '#F59E0B' : '#38BDF8' },
-                          ]}
-                        />
-                        <Text style={styles.serviceMapLegendText}>
-                          {activeService === 'laundry' ? 'Pickup station' : 'Pickup hub'}
-                        </Text>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#F59E0B' }]} />
+                        <Text style={styles.serviceMapLegendText}>Drop-off hub</Text>
                       </View>
-                      {activeService === 'rides' && rideWizardStep === 'pickup' ? (
-                        <View style={styles.serviceMapLegendRow}>
-                          <View style={[styles.serviceMapLegendDot, { backgroundColor: '#C9A227' }]} />
-                          <Text style={styles.serviceMapLegendText}>Top destination</Text>
-                        </View>
-                      ) : null}
+                    </View>
+                  ) : activeService === 'laundry' && laundryPickupMode === 'mamafua' ? (
+                    <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 48 }]}>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
+                        <Text style={styles.serviceMapLegendText}>Your home</Text>
+                      </View>
+                    </View>
+                  ) : activeService === 'rides' && rideWizardStep === 'pickup' ? (
+                    <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 48 }]}>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
+                        <Text style={styles.serviceMapLegendText}>You are here</Text>
+                      </View>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#38BDF8' }]} />
+                        <Text style={styles.serviceMapLegendText}>Pickup hub</Text>
+                      </View>
+                      <View style={styles.serviceMapLegendRow}>
+                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#C9A227' }]} />
+                        <Text style={styles.serviceMapLegendText}>Top destination</Text>
+                      </View>
                     </View>
                   ) : null}
                   {mapNeedsRecenter ? (
@@ -6657,11 +7629,19 @@ export default function App() {
                       </Pressable>
                     </View>
                     <Text style={styles.homeDeepCount}>
-                      {(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin for
-                      details
+                      {dataLoading
+                        ? 'Loading listings…'
+                        : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin for details`}
                     </Text>
                     <View style={styles.listingsMapBody}>
-                      {listingsMapHtml ? (
+                      {dataLoading ? (
+                        <View style={[styles.serviceMapFallback, { justifyContent: 'center' }]}>
+                          <ActivityIndicator size="small" color={theme.primary} />
+                          <Text style={[styles.serviceMapFallbackText, { marginTop: 10 }]}>
+                            Loading listings from server…
+                          </Text>
+                        </View>
+                      ) : listingsMapHtml ? (
                         <WebView
                           ref={listingsMapWebViewRef}
                           source={{ html: listingsMapHtml }}
@@ -6731,7 +7711,7 @@ export default function App() {
                   keyboardShouldPersistTaps="handled"
                   showsVerticalScrollIndicator={false}
                 >
-                  <Text style={styles.homeDeepPageLead}>Tune the catalog, open a row for the full sheet.</Text>
+                  <Text style={styles.homeDeepPageLead}>Browse published listings from the server.</Text>
                   <View style={styles.valetSegmentTrack}>
                     <Pressable
                       style={[styles.valetSegment, listingCatalog === 'bnb' && styles.valetSegmentActive]}
@@ -6755,20 +7735,11 @@ export default function App() {
                       </Text>
                     </Pressable>
                   </View>
-                  <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>Area on the map</Text>
-                  <Text style={styles.homeDeepFilterHint}>
-                    Near me uses your map pin and the distance cap only. All areas and county chips ignore distance —
-                    they filter by place only.
-                  </Text>
                   <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.homeDeepChipRow}>
-                    {(['near_me', 'any', ...SUPPORTED_COUNTIES] as const).map((key) => {
+                    {(['near_me', 'any', 'kisumu'] as const).map((key) => {
                       const on = listingCounty === key;
                       const label =
-                        key === 'near_me'
-                          ? 'Near me'
-                          : key === 'any'
-                            ? 'All areas'
-                            : key.charAt(0).toUpperCase() + key.slice(1);
+                        key === 'near_me' ? 'Near me' : key === 'any' ? 'All areas' : 'Kisumu';
                       return (
                         <Pressable
                           key={key}
@@ -6779,75 +7750,53 @@ export default function App() {
                         </Pressable>
                       );
                     })}
+                    {listingCounty === 'near_me' && currentCoords ? (
+                      <Pressable
+                        style={[styles.homeDeepChip, styles.homeDeepChipOn]}
+                        onPress={() => {
+                          const opts = [...STAYS_RADIUS_OPTIONS];
+                          const i = opts.indexOf(listingRadiusKm);
+                          setListingRadiusKm(opts[(i >= 0 ? i + 1 : 0) % opts.length]);
+                        }}
+                      >
+                        <Text style={[styles.homeDeepChipText, styles.homeDeepChipTextOn]}>
+                          {listingRadiusKm} km
+                        </Text>
+                      </Pressable>
+                    ) : null}
                   </ScrollView>
-                  <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>Distance cap</Text>
-                  <Text style={styles.homeDeepFilterHint}>
-                    {listingCounty !== 'near_me'
-                      ? 'Select Near me to turn on distance filtering from your pin.'
-                      : !currentCoords
-                        ? 'Enable location from the map pill to use Near me and the distance cap.'
-                        : `Listings within ${listingRadiusKm} km of your pin (BnBs and rentals).`}
-                  </Text>
-                  <Pressable
-                    style={[
-                      styles.homeDeepRadiusTap,
-                      (listingCounty !== 'near_me' || !currentCoords) && styles.homeDeepRadiusTapMuted,
-                    ]}
-                    onPress={() => {
-                      const opts = [...STAYS_RADIUS_OPTIONS];
-                      const i = opts.indexOf(listingRadiusKm);
-                      setListingRadiusKm(opts[(i >= 0 ? i + 1 : 0) % opts.length]);
-                    }}
-                    disabled={listingCounty !== 'near_me' || !currentCoords}
-                  >
-                    <Text
-                      style={[
-                        styles.homeDeepRadiusTapText,
-                        (listingCounty !== 'near_me' || !currentCoords) && styles.homeDeepRadiusTapTextMuted,
-                      ]}
-                    >
-                      {listingRadiusKm} km · tap to cycle
-                      {listingCounty !== 'near_me' ? ' · needs Near me' : !currentCoords ? ' · needs location' : ''}
-                    </Text>
-                  </Pressable>
-                  {listingCatalog === 'bnb' ? (
-                    <>
-                      <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>Stay type</Text>
-                      <View style={styles.valetSegmentTrack}>
-                        {(['any', 'entire', 'room'] as const).map((sp, si) => (
-                          <Fragment key={sp}>
-                            {si > 0 ? <View style={styles.valetSegmentDivider} /> : null}
-                            <Pressable
-                              style={[styles.valetSegment, listingSpace === sp && styles.valetSegmentActive]}
-                              onPress={() => setListingSpace(sp)}
-                            >
-                              <Text style={[styles.valetSegmentText, listingSpace === sp && styles.valetSegmentTextActive]}>
-                                {sp === 'any' ? 'Any' : sp === 'entire' ? 'Entire' : 'Room'}
-                              </Text>
-                            </Pressable>
-                          </Fragment>
-                        ))}
-                      </View>
-                    </>
-                  ) : null}
-                  <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>Search</Text>
                   <TextInput
                     value={listingQuery}
                     onChangeText={setListingQuery}
-                    placeholder="Title or vibe"
+                    placeholder="Search by title"
                     placeholderTextColor={theme.textMuted}
                     style={styles.homeDeepSearch}
                   />
                   <Text style={styles.homeDeepCount}>
-                    {(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} results
+                    {dataLoading
+                      ? 'Loading…'
+                      : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} results`}
                   </Text>
-                  {(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length === 0 ? (
+                  {dataLoading ? (
+                    <View style={styles.listingsLoadingRow}>
+                      <ActivityIndicator size="small" color={theme.primary} />
+                      <Text style={[styles.juxHintMuted, { marginLeft: 10 }]}>Loading listings from server…</Text>
+                    </View>
+                  ) : dataError ? (
+                    <View style={styles.listingsLoadingRow}>
+                      <Text style={[styles.juxHintMuted, { flex: 1 }]}>{dataError}</Text>
+                      <Pressable onPress={() => void refreshAppData()} hitSlop={8}>
+                        <Text style={{ color: theme.primary, fontWeight: '600' }}>Retry</Text>
+                      </Pressable>
+                    </View>
+                  ) : (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length === 0 ? (
                     <Text style={styles.juxHintMuted}>
                       No matches — try All areas or a county, or Near me with location and a wider distance cap
                       {listingCatalog === 'bnb' ? ', stay type' : ''}, or search.
                     </Text>
                   ) : null}
-                  {(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).map((row, ri, arr) => (
+                  {!dataLoading && listingsLoaded
+                    ? (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).map((row, ri, arr) => (
                     <Pressable
                       key={listingCatalog === 'bnb' ? (row as BnbListing).id : (row as HouseListing).id}
                       style={[styles.listingCatRow, ri === arr.length - 1 && styles.listingCatRowLast]}
@@ -6889,7 +7838,8 @@ export default function App() {
                       </View>
                       <Text style={styles.listingCatChev}>›</Text>
                     </Pressable>
-                  ))}
+                  ))
+                    : null}
                 </ScrollView>
                 )
               ) : homeDeepPage === 'listing-detail' && listingDetail && listingDetailEntity ? (
@@ -6978,20 +7928,11 @@ export default function App() {
                           <Pressable
                             onPress={() => {
                               const b = listingDetailEntity as BnbListing;
-                              if (!b.has3dTour) return;
-                              setTourSheetTarget({ kind: 'bnb', id: b.id });
+                              void submitListingRequest('tour', b.id, b.title, 'bnb');
                             }}
-                            disabled={!(listingDetailEntity as BnbListing).has3dTour}
                             style={styles.textRowActionHit}
                           >
-                            <Text
-                              style={[
-                                styles.textRowActionMuted,
-                                !(listingDetailEntity as BnbListing).has3dTour && styles.valetListingSecondaryDisabled,
-                              ]}
-                            >
-                              3D tour
-                            </Text>
+                            <Text style={styles.textRowActionMuted}>Request tour</Text>
                           </Pressable>
                         </View>
                       </View>
@@ -7075,20 +8016,11 @@ export default function App() {
                           <Pressable
                             onPress={() => {
                               const h = listingDetailEntity as HouseListing;
-                              if (!h.has3dTour) return;
-                              setTourSheetTarget({ kind: 'house', id: h.id });
+                              void submitListingRequest('tour', h.id, h.title, 'house');
                             }}
-                            disabled={!(listingDetailEntity as HouseListing).has3dTour}
                             style={styles.textRowActionHit}
                           >
-                            <Text
-                              style={[
-                                styles.textRowActionMuted,
-                                !(listingDetailEntity as HouseListing).has3dTour && styles.valetListingSecondaryDisabled,
-                              ]}
-                            >
-                              3D walkthrough
-                            </Text>
+                            <Text style={styles.textRowActionMuted}>Request tour</Text>
                           </Pressable>
                         </View>
                       </View>
@@ -7146,15 +8078,15 @@ export default function App() {
                   </Text>
                   <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>When</Text>
                   <View style={styles.valetSegmentTrack}>
-                    {(['asap', 'morning', 'evening'] as const).map((w, wi) => (
-                      <Fragment key={w}>
+                    {mamafuaWhenOptions.map((band, wi) => (
+                      <Fragment key={band.id}>
                         {wi > 0 ? <View style={styles.valetSegmentDivider} /> : null}
                         <Pressable
-                          style={[styles.valetSegment, valetStudioWhen === w && styles.valetSegmentActive]}
-                          onPress={() => setValetStudioWhen(w)}
+                          style={[styles.valetSegment, valetStudioWhen === band.id && styles.valetSegmentActive]}
+                          onPress={() => setValetStudioWhen(band.id)}
                         >
-                          <Text style={[styles.valetSegmentText, valetStudioWhen === w && styles.valetSegmentTextActive]}>
-                            {w === 'asap' ? 'Flexible' : w === 'morning' ? 'Morning' : 'Evening'}
+                          <Text style={[styles.valetSegmentText, valetStudioWhen === band.id && styles.valetSegmentTextActive]}>
+                            {band.label}
                           </Text>
                         </Pressable>
                       </Fragment>
@@ -7221,6 +8153,7 @@ export default function App() {
             </View>
           ) : null}
       </View>
+      </ServiceSwipeProvider>
       <Modal
         visible={destinationSearchOpen}
         animationType="slide"
@@ -8220,6 +9153,13 @@ export default function App() {
   );
 
   const renderCurrent = () => {
+    if (authLoading) {
+      return (
+        <View style={[styles.page, { alignItems: 'center', justifyContent: 'center' }]}>
+          <ActivityIndicator color={theme.primary} size="large" />
+        </View>
+      );
+    }
     if (!isAuthed) return renderOnboarding();
     if (activeTab === 'home' || activeTab === 'trips' || activeTab === 'profile') return renderHome();
     return renderHome();
@@ -9396,7 +10336,9 @@ const createStyles = (theme: Theme) =>
       width: 40,
       height: 40,
       borderRadius: 12,
-      backgroundColor: theme.statusBar === 'light' ? theme.surface : '#FFFFFF',
+      backgroundColor: theme.sheet,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
       alignItems: 'center',
       justifyContent: 'center',
       shadowColor: '#000',
@@ -10303,7 +11245,7 @@ const createStyles = (theme: Theme) =>
       width: 36,
       height: 4,
       borderRadius: 2,
-      backgroundColor: theme.statusBar === 'light' ? '#3D2418' : '#DDD0C8',
+      backgroundColor: theme.grabber,
       marginBottom: 6,
     },
     juxSheetPeekTitle: {
@@ -10431,12 +11373,70 @@ const createStyles = (theme: Theme) =>
       fontFamily: 'Inter_600SemiBold',
       color: theme.accentBlue,
     },
-    juxToast: {
-      fontSize: 11,
+    juxNoticePill: {
+      alignSelf: 'center',
+      marginHorizontal: 16,
+      marginBottom: 8,
+      paddingVertical: 8,
+      paddingHorizontal: 14,
+      borderRadius: 999,
+      backgroundColor: theme.surface,
+      borderWidth: 1,
+      borderColor: theme.border,
+      maxWidth: '92%',
+    },
+    juxNoticePillText: {
+      fontSize: 12,
       color: theme.accentBlue,
-      fontFamily: 'Inter_500Medium',
+      fontFamily: 'Inter_600SemiBold',
       textAlign: 'center',
-      marginBottom: 6,
+    },
+    pullRefreshStrip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+      paddingVertical: 4,
+      minHeight: 28,
+      marginBottom: 2,
+    },
+    pullRefreshGlyph: {
+      fontSize: 17,
+      color: theme.primary,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    pullRefreshHint: {
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
+      color: theme.textSecondary,
+    },
+    juxSheetScrollHost: {
+      flex: 1,
+      minHeight: 0,
+    },
+    juxSheetScrollClip: {
+      flex: 1,
+      minHeight: 0,
+      position: 'relative',
+    },
+    sheetScrollCueWrap: {
+      position: 'absolute',
+      left: 0,
+      right: 0,
+      bottom: 0,
+      alignItems: 'center',
+      paddingTop: 18,
+      paddingBottom: 6,
+      borderTopWidth: StyleSheet.hairlineWidth,
+    },
+    sheetScrollCueFade: {
+      ...StyleSheet.absoluteFillObject,
+      opacity: 0.92,
+    },
+    sheetScrollCueText: {
+      fontSize: 11,
+      fontFamily: 'Inter_600SemiBold',
+      letterSpacing: 0.2,
     },
     juxErrorInline: {
       fontSize: 11,
@@ -10554,6 +11554,157 @@ const createStyles = (theme: Theme) =>
       marginTop: 6,
       marginBottom: 4,
     },
+    fuaProgressDots: {
+      flexDirection: 'row',
+      gap: 6,
+      marginBottom: 14,
+    },
+    fuaProgressDot: {
+      flex: 1,
+      height: 3,
+      borderRadius: 2,
+    },
+    fuaInlineLink: {
+      fontSize: 13,
+      fontFamily: 'Inter_600SemiBold',
+      marginBottom: 12,
+    },
+    fuaAddressRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginBottom: 10,
+    },
+    fuaAddressPin: {
+      fontSize: 14,
+    },
+    fuaAddressText: {
+      flex: 1,
+      fontSize: 14,
+      fontFamily: 'Inter_500Medium',
+      lineHeight: 19,
+    },
+    fuaAddressAction: {
+      fontSize: 16,
+      fontFamily: 'Inter_600SemiBold',
+      paddingHorizontal: 4,
+    },
+    fuaChipRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+      marginBottom: 12,
+    },
+    fuaChip: {
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      borderRadius: 999,
+      borderWidth: 1,
+    },
+    fuaChipText: {
+      fontSize: 12,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    fuaNotesInput: {
+      borderWidth: 1,
+      borderRadius: 10,
+      padding: 10,
+      minHeight: 56,
+      fontSize: 13,
+      fontFamily: 'Inter_400Regular',
+      marginBottom: 12,
+      textAlignVertical: 'top',
+    },
+    fuaTaskRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      paddingVertical: 10,
+      paddingHorizontal: 12,
+      borderWidth: 1,
+      borderRadius: 10,
+      marginBottom: 8,
+    },
+    fuaTaskLabel: {
+      flex: 1,
+      fontSize: 14,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    fuaTaskPrice: {
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
+    },
+    fuaTaskCheck: {
+      fontSize: 14,
+      fontFamily: 'Inter_700Bold',
+      width: 18,
+      textAlign: 'center',
+    },
+    fuaReceipt: {
+      borderRadius: 12,
+      borderWidth: 1,
+      padding: 14,
+      gap: 6,
+    },
+    fuaReceiptLine: {
+      fontSize: 14,
+      fontFamily: 'Inter_600SemiBold',
+      lineHeight: 20,
+    },
+    fuaReceiptMeta: {
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
+    },
+    fuaReceiptTotal: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginTop: 8,
+      paddingTop: 10,
+      borderTopWidth: StyleSheet.hairlineWidth,
+    },
+    fuaReceiptTotalLabel: {
+      fontSize: 13,
+      fontFamily: 'Inter_500Medium',
+    },
+    fuaReceiptTotalValue: {
+      fontSize: 17,
+      fontFamily: 'Inter_700Bold',
+    },
+    listingsLoadingRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: 28,
+    },
+    fuaServiceChoiceRow: {
+      flexDirection: 'row',
+      gap: 10,
+      marginBottom: 16,
+    },
+    fuaServiceChoiceCard: {
+      flex: 1,
+      borderRadius: 14,
+      borderWidth: 1.5,
+      padding: 14,
+      gap: 4,
+    },
+    fuaServiceChoiceCardOn: {
+      borderColor: theme.primary,
+      backgroundColor: theme.primaryLight,
+    },
+    fuaServiceChoiceIcon: {
+      marginBottom: 2,
+    },
+    fuaServiceChoiceTitle: {
+      fontSize: 14,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    fuaServiceChoiceSub: {
+      fontSize: 11,
+      fontFamily: 'Inter_400Regular',
+      lineHeight: 15,
+    },
     fuaStationChip: {
       marginRight: 8,
       paddingHorizontal: 12,
@@ -10599,7 +11750,7 @@ const createStyles = (theme: Theme) =>
       backgroundColor: 'transparent',
     },
     valetSegmentActive: {
-      backgroundColor: theme.primary,
+      backgroundColor: theme.primaryLight,
     },
     valetSegmentDivider: {
       width: StyleSheet.hairlineWidth,
@@ -10612,7 +11763,7 @@ const createStyles = (theme: Theme) =>
     },
     valetSegmentTextActive: {
       fontFamily: 'Inter_600SemiBold',
-      color: BRAND.primaryText,
+      color: theme.primary,
     },
     valetSegmentTextDisabled: {
       opacity: 0.38,
@@ -11090,15 +12241,16 @@ const createStyles = (theme: Theme) =>
       paddingVertical: 6,
     },
     listingsViewChipOn: {
-      backgroundColor: theme.primary,
+      backgroundColor: theme.primaryLight,
     },
     listingsViewChipText: {
       fontSize: 12,
-      fontFamily: 'Inter_600SemiBold',
+      fontFamily: 'Inter_500Medium',
       color: theme.textSecondary,
     },
     listingsViewChipTextOn: {
-      color: BRAND.primaryText,
+      fontFamily: 'Inter_600SemiBold',
+      color: theme.primary,
     },
     listingsMapShell: {
       flex: 1,
@@ -11385,12 +12537,9 @@ const createStyles = (theme: Theme) =>
       justifyContent: 'center',
     },
     serviceSegmentBtnOn: {
-      backgroundColor: theme.primary,
-      shadowColor: theme.primary,
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.3,
-      shadowRadius: 8,
-      elevation: 3,
+      backgroundColor: theme.sheet,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
     },
     serviceSegmentText: {
       fontSize: 11,
@@ -11400,7 +12549,7 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
     },
     serviceSegmentTextOn: {
-      color: '#FFFFFF',
+      color: theme.textPrimary,
     },
     staysSubSegment: {
       flexDirection: 'row',
@@ -11418,40 +12567,37 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
     },
     staysSubSegmentBtnOn: {
-      backgroundColor: theme.primary,
+      backgroundColor: theme.sheet,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
     },
     staysSubSegmentText: {
       fontSize: 13,
-      fontFamily: 'Inter_600SemiBold',
+      fontFamily: 'Inter_500Medium',
       color: theme.textSecondary,
     },
     staysSubSegmentTextOn: {
-      color: BRAND.primaryText,
-    },
-    staysRadiusRow: {
-      flexDirection: 'row',
-      gap: 8,
-      marginBottom: 12,
-    },
-    staysRadiusChip: {
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: theme.border,
-      backgroundColor: theme.mutedSurface,
-    },
-    staysRadiusChipOn: {
-      borderColor: theme.primary,
-      backgroundColor: theme.primary,
-    },
-    staysRadiusChipText: {
-      fontSize: 12,
       fontFamily: 'Inter_600SemiBold',
-      color: theme.textSecondary,
+      color: theme.textPrimary,
     },
-    staysRadiusChipTextOn: {
-      color: '#FFFFFF',
+    staysSectionActionsRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      marginBottom: 10,
+    },
+    staysViewLink: {
+      fontSize: 13,
+      fontFamily: 'Inter_500Medium',
+      color: theme.textMuted,
+    },
+    staysViewLinkOn: {
+      fontFamily: 'Inter_600SemiBold',
+      color: theme.textPrimary,
+    },
+    staysViewDot: {
+      fontSize: 13,
+      color: theme.textMuted,
     },
     profileHeaderRow: {
       flexDirection: 'row',
@@ -11926,7 +13072,7 @@ const createStyles = (theme: Theme) =>
       marginBottom: 14,
     },
     rideStatusEmoji: {
-      fontSize: 22,
+      marginBottom: 4,
     },
     rideStatusTitle: {
       flex: 1,
@@ -11971,8 +13117,12 @@ const createStyles = (theme: Theme) =>
       backgroundColor: theme.primaryLight,
     },
     rideTierIcon: {
-      fontSize: 28,
       marginBottom: 8,
+    },
+    rideReviewRideRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
     },
     rideTierLabel: {
       fontSize: 14,

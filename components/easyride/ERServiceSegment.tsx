@@ -68,7 +68,7 @@ export function ERServiceSegment<T extends string>({
             </Text>
             {comingSoon ? (
               <View style={[styles.soonBadge, darkMode && styles.soonBadgeDark]}>
-                <Text style={styles.soonText}>{soonEmoji ? `${soonEmoji} Soon` : 'Soon'}</Text>
+                <Text style={styles.soonText}>Soon</Text>
               </View>
             ) : null}
           </Pressable>
@@ -96,11 +96,11 @@ const styles = StyleSheet.create({
     borderColor: 'transparent',
   },
   chipOn: {
-    backgroundColor: BRAND.primary,
+    backgroundColor: BRAND.light.sheet,
     borderColor: BRAND.primary,
   },
   chipSoon: {
-    borderColor: '#E5E5E5',
+    borderColor: BRAND.light.border,
     backgroundColor: 'transparent',
     opacity: 0.85,
   },
@@ -116,7 +116,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
   },
   textOn: {
-    color: BRAND.primaryText,
+    color: BRAND.primary,
   },
   soonBadge: {
     paddingHorizontal: 5,

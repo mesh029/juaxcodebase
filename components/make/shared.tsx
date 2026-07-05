@@ -20,7 +20,7 @@ function muted(dark: boolean) {
 
 export function MakeLabel({ children, darkMode = false }: { children: string } & DarkProps) {
   return (
-    <Text style={[styles.label, { color: darkMode ? '#5C3D30' : '#9CA3AF' }]}>{children}</Text>
+    <Text style={[styles.label, { color: darkMode ? '#A1A1AA' : MAKE.textMuted }]}>{children}</Text>
   );
 }
 
@@ -206,7 +206,7 @@ export function MakeStatusStepper({
           const active = i === current;
           const last = i === steps.length - 1;
           return (
-            <View key={step} style={styles.statusStep}>
+            <View key={`${i}-${step}`} style={styles.statusStep}>
               <View style={styles.statusDotRow}>
                 <View
                   style={[

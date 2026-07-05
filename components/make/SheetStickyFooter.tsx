@@ -9,7 +9,8 @@ type Props = {
   sublabel?: string;
   style?: ViewStyle;
   darkMode?: boolean;
-  tone?: 'primary' | 'outline';
+  /** primary = final action · subtle = wizard continue (home-style) · outline = secondary */
+  tone?: 'primary' | 'outline' | 'subtle';
   onBack?: () => void;
   backLabel?: string;
   children?: ReactNode;
@@ -22,29 +23,28 @@ export function SheetStickyFooter({
   sublabel,
   style,
   darkMode = false,
-  tone = 'primary',
+  tone = 'subtle',
   onBack,
   backLabel = 'Back',
   children,
 }: Props) {
   const border = darkMode ? BRAND.dark.border : BRAND.light.border;
   const bg = darkMode ? BRAND.dark.sheet : BRAND.light.sheet;
+  const textPrimary = darkMode ? BRAND.dark.text : BRAND.light.text;
+  const textSecondary = darkMode ? BRAND.dark.textSecondary : BRAND.light.textSecondary;
+  const muted = darkMode ? BRAND.dark.surface : BRAND.light.primaryFaint;
 
   return (
     <View style={[styles.shell, { borderTopColor: border, backgroundColor: bg }, style]}>
       {sublabel ? (
         <View style={styles.sublabelRow}>
-          <Text style={[styles.sublabel, { color: darkMode ? BRAND.dark.textSecondary : BRAND.light.textSecondary }]}>
-            {sublabel}
-          </Text>
+          <Text style={[styles.sublabel, { color: textSecondary }]}>{sublabel}</Text>
         </View>
       ) : null}
       {children}
       {onBack ? (
         <Pressable onPress={onBack} style={styles.backLink} hitSlop={8}>
-          <Text style={[styles.backLinkText, { color: darkMode ? BRAND.dark.textSecondary : BRAND.light.textSecondary }]}>
-            ← {backLabel}
-          </Text>
+          <Text style={[styles.backLinkText, { color: textSecondary }]}>← {backLabel}</Text>
         </Pressable>
       ) : null}
       <Pressable
@@ -52,6 +52,8 @@ export function SheetStickyFooter({
         disabled={disabled}
         style={[
           styles.cta,
+          tone === 'primary' && styles.ctaPrimary,
+          tone === 'subtle' && [styles.ctaSubtle, { borderColor: border, backgroundColor: muted }],
           tone === 'outline' && styles.ctaOutline,
           disabled && styles.ctaDisabled,
         ]}
@@ -59,8 +61,10 @@ export function SheetStickyFooter({
         <Text
           style={[
             styles.ctaText,
+            tone === 'primary' && styles.ctaTextPrimary,
+            tone === 'subtle' && [styles.ctaTextSubtle, { color: disabled ? '#9B9B9B' : textPrimary }],
             tone === 'outline' && styles.ctaTextOutline,
-            disabled && styles.ctaTextDisabled,
+            disabled && tone === 'primary' && styles.ctaTextDisabled,
           ]}
         >
           {label}
@@ -75,47 +79,57 @@ const styles = StyleSheet.create({
     flexShrink: 0,
     borderTopWidth: StyleSheet.hairlineWidth,
     paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 8,
+    paddingTop: 6,
+    paddingBottom: 4,
   },
   sublabelRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 10,
+    marginBottom: 4,
   },
   sublabel: {
-    fontSize: 13,
-    fontFamily: 'Inter_500Medium',
+    fontSize: 11,
+    fontFamily: 'Inter_400Regular',
   },
   backLink: {
     alignSelf: 'flex-start',
-    paddingVertical: 4,
-    marginBottom: 10,
+    paddingVertical: 2,
+    marginBottom: 4,
   },
   backLinkText: {
-    fontSize: 14,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: 12,
+    fontFamily: 'Inter_500Medium',
   },
   cta: {
-    minHeight: 52,
-    borderRadius: 12,
-    backgroundColor: BRAND.primary,
+    minHeight: 40,
+    borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  ctaPrimary: {
+    backgroundColor: BRAND.primary,
+  },
+  ctaSubtle: {
+    borderWidth: StyleSheet.hairlineWidth,
+  },
   ctaDisabled: {
-    backgroundColor: '#E5E5E5',
+    opacity: 0.45,
   },
   ctaText: {
-    color: BRAND.primaryText,
-    fontSize: 15,
+    fontSize: 14,
     fontFamily: 'Inter_600SemiBold',
-    letterSpacing: 0.2,
+    letterSpacing: 0.1,
+  },
+  ctaTextPrimary: {
+    color: BRAND.primaryText,
+  },
+  ctaTextSubtle: {
+    fontFamily: 'Inter_500Medium',
   },
   ctaOutline: {
     backgroundColor: 'transparent',
-    borderWidth: 1.5,
+    borderWidth: 1,
     borderColor: BRAND.primary,
   },
   ctaTextOutline: {

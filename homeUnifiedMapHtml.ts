@@ -23,8 +23,8 @@ export type HomeUnifiedBanks = {
   destinations: HomeUnifiedPin[];
 };
 
-function slicePins(pts: HomeUnifiedPin[]) {
-  return pts.slice(0, 14).map((p) => ({
+function slicePins(pts: HomeUnifiedPin[], max = 14) {
+  return pts.slice(0, max).map((p) => ({
     id: p.id,
     title: p.title,
     subtitle: p.subtitle,
@@ -44,10 +44,10 @@ export function buildUnifiedHomeServicesMapHtml(
   if (!token) return null;
 
   const BANKS = {
-    laundry: slicePins(banks.laundry),
-    bnbs: slicePins(banks.bnbs),
-    houses: slicePins(banks.houses),
-    rides: slicePins(banks.rides),
+    laundry: slicePins(banks.laundry, 14),
+    bnbs: slicePins(banks.bnbs, 50),
+    houses: slicePins(banks.houses, 50),
+    rides: slicePins(banks.rides, 14),
     destinations: slicePins(banks.destinations),
   };
   const banksJson = JSON.stringify(BANKS);
@@ -158,6 +158,7 @@ export function buildUnifiedHomeServicesMapHtml(
       let activePoints = (BANKS.laundry || []).slice();
       let SELECTED_HIGHLIGHT = null;
       let mapReady = false;
+      let initialFitDone = false;
       var pendingMode = 'laundry';
       var userMarker = null;
       function postMsg(obj) {
@@ -217,7 +218,8 @@ export function buildUnifiedHomeServicesMapHtml(
           };
         });
       }
-      function fitProximityNice() {
+      function fitProximityNice(force) {
+        if (initialFitDone && !force) return;
         var pad = DATA.viewportPad || { top: 56, bottom: 112, left: 16, right: 16 };
         var features = featuresFromPoints(activePoints);
         if (!DATA.current && features.length === 0) return;
@@ -229,12 +231,14 @@ export function buildUnifiedHomeServicesMapHtml(
             duration: 650,
             essential: true,
           });
+          initialFitDone = true;
           return;
         }
         var b = new mapboxgl.LngLatBounds();
         if (DATA.current) b.extend([DATA.current.longitude, DATA.current.latitude]);
         features.forEach(function (f) { b.extend(f.geometry.coordinates); });
         map.fitBounds(b, { padding: pad, maxZoom: 14.2, duration: 700, essential: true });
+        initialFitDone = true;
       }
       function syncPickHighlight() {
         var show = !!SELECTED_HIGHLIGHT;
@@ -275,7 +279,7 @@ export function buildUnifiedHomeServicesMapHtml(
         var dests = BANKS.destinations || [];
         return hubs.concat(dests);
       }
-      function internalApplyMode(mode) {
+      function internalApplyMode(mode, refit) {
         homeMode =
           mode === 'houses' ? 'houses' : mode === 'bnbs' ? 'bnbs' : mode === 'rides' ? 'rides' : 'laundry';
         activePoints =
@@ -289,8 +293,22 @@ export function buildUnifiedHomeServicesMapHtml(
         var fc = { type: 'FeatureCollection', features: featuresFromPoints(activePoints) };
         if (map.getSource('pins')) map.getSource('pins').setData(fc);
         syncPickHighlight();
-        fitProximityNice();
+        if (refit !== false) fitProximityNice(false);
       }
+      window.juaSetViewportPad = function (pad) {
+        if (pad && typeof pad === 'object') DATA.viewportPad = pad;
+      };
+      window.juaUpdatePinBanks = function (banks) {
+        if (!banks || typeof banks !== 'object') return;
+        if (banks.laundry) BANKS.laundry = banks.laundry;
+        if (banks.bnbs) BANKS.bnbs = banks.bnbs;
+        if (banks.houses) BANKS.houses = banks.houses;
+        if (banks.rides) BANKS.rides = banks.rides;
+        if (banks.destinations) BANKS.destinations = banks.destinations;
+        try {
+          if (mapReady) internalApplyMode(homeMode, false);
+        } catch (_) {}
+      };
       window.juaSetRidesMapFocus = function (focus) {
         ridesMapFocus = focus === 'destination' ? 'destination' : 'pickup';
         try {
@@ -298,15 +316,15 @@ export function buildUnifiedHomeServicesMapHtml(
             activePoints = ridesActivePoints();
             var fc = { type: 'FeatureCollection', features: featuresFromPoints(activePoints) };
             if (map.getSource('pins')) map.getSource('pins').setData(fc);
-            fitProximityNice();
+            fitProximityNice(true);
           }
         } catch (_) {}
       };
-      window.juaApplyHomeMode = function (mode) {
+      window.juaApplyHomeMode = function (mode, refit) {
         pendingMode =
           mode === 'houses' ? 'houses' : mode === 'bnbs' ? 'bnbs' : mode === 'rides' ? 'rides' : 'laundry';
         try {
-          if (mapReady) internalApplyMode(pendingMode);
+          if (mapReady) internalApplyMode(pendingMode, refit);
         } catch (_) {}
       };
       window.juaSetHighlight = function (lng, lat) {
@@ -350,7 +368,7 @@ export function buildUnifiedHomeServicesMapHtml(
         });
         if (DATA.current) setUserMarker(DATA.current);
         mapReady = true;
-        internalApplyMode(pendingMode);
+        internalApplyMode(pendingMode, true);
         map.on('click', 'pins-circle', async function (e) {
           var f = e.features[0];
           var c = f.geometry.coordinates.slice();

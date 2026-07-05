@@ -128,6 +128,21 @@ import { StatusBar } from 'expo-status-bar';
 
 Only suppress on modals and bottom-sheet states where it would conflict with horizontal scroll.
 
+### 11. Service swipe (Home map shell)
+
+On **Home**, swipe **left** → next service (FUA → SAKA KEJA → RIDES), swipe **right** → previous.
+
+- Implemented via `useServiceSwipePan` on the map + sheet shell (`juxShell`).
+- **Disabled** when touching a `CarouselZone` (hero carousels, stay cards, chip rows, segment scroll).
+- Haptic tick on successful service change (`HapticMap.selection`).
+
+```tsx
+// hooks/useServiceSwipe.ts — SWIPEABLE_SERVICES: laundry | bnbs | rides
+<CarouselZone>
+  <ScrollView horizontal>...</ScrollView>
+</CarouselZone>
+```
+
 ---
 
 ## Figma MCP → codebase mapping

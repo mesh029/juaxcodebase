@@ -12,6 +12,7 @@ import {
   type ListRenderItem,
 } from 'react-native';
 import { BRAND } from '../theme/brand';
+import { CarouselZone } from './chrome/CarouselZone';
 
 export type IntroHeroSlide = {
   id: string;
@@ -133,7 +134,7 @@ export function IntroHeroCarousel({
   if (slides.length === 0) return null;
 
   return (
-    <View style={styles.wrap}>
+    <CarouselZone style={styles.wrap}>
       <View style={styles.headerRow}>
         <Text style={[styles.hint, { color: darkMode ? BRAND.dark.muted : BRAND.light.textMuted }]}>{hint}</Text>
         <Text style={[styles.counter, { color: darkMode ? BRAND.dark.muted : BRAND.light.textMuted }]}>
@@ -169,7 +170,7 @@ export function IntroHeroCarousel({
           </Pressable>
         ))}
       </View>
-    </View>
+    </CarouselZone>
   );
 }
 

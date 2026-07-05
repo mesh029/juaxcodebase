@@ -44,7 +44,8 @@
         {
           "locationWhenInUsePermission": "Jua X uses your location to find nearby stays, laundry stations, and calculate ride routes."
         }
-      ]
+      ],
+      "expo-secure-store"
     ]
   }
 }
