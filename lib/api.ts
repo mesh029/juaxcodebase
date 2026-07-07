@@ -185,13 +185,34 @@ export async function fetchAppCatalog(county = 'kisumu'): Promise<AppCatalogBoot
 
 // ── Listings ────────────────────────────────────────────────────────
 
+export const PILOT_LISTING_COUNTIES = ['kisumu', 'nairobi', 'mombasa', 'nyamira'] as const;
+
 export async function fetchListings(county: string, type: 'rental' | 'bnb'): Promise<PublicListing[]> {
   return api(`/api/v1/listings?county=${encodeURIComponent(county)}&type=${type}`, { auth: false });
 }
 
-export async function fetchListingsNearby(lat: number, lng: number, radiusKm = 15): Promise<PublicListing[]> {
+/** Merge published listings across all pilot counties — one API call. */
+export async function fetchAllPilotListings(type: 'rental' | 'bnb'): Promise<PublicListing[]> {
+  const catalog = await fetchAppCatalog('pilot');
+  return type === 'rental' ? catalog.listings.rental : catalog.listings.bnb;
+}
+
+export async function fetchListingsNearby(
+  lat: number,
+  lng: number,
+  radiusKm = 5,
+  type?: 'rental' | 'bnb',
+  county = 'kisumu',
+): Promise<PublicListing[]> {
+  const params = new URLSearchParams({
+    lat: String(lat),
+    lng: String(lng),
+    radiusKm: String(radiusKm),
+    county,
+  });
+  if (type) params.set('type', type);
   const data = await api<{ listings: PublicListing[] }>(
-    `/api/v1/listings/nearby?lat=${lat}&lng=${lng}&radiusKm=${radiusKm}`,
+    `/api/v1/listings/nearby?${params.toString()}`,
     { auth: false },
   );
   return data.listings ?? (data as unknown as PublicListing[]);
@@ -223,11 +244,87 @@ export async function fetchLaundryOrders(): Promise<LaundryOrder[]> {
   return api('/api/v1/laundry/orders', { auth: true });
 }
 
+export async function confirmLaundryDelivery(orderId: string): Promise<{
+  ok: boolean;
+  order: LaundryOrder;
+  message: string;
+}> {
+  return api(`/api/v1/laundry/orders/${orderId}/confirm`, { method: 'POST', auth: true });
+}
+
 // ── Subscriptions ───────────────────────────────────────────────────
 
 export async function fetchSubscriptionPlans(): Promise<SubscriptionPlan[]> {
   const data = await api<{ plans: SubscriptionPlan[] }>('/api/v1/subscriptions/plans', { auth: false });
   return data.plans;
+}
+
+export async function fetchActiveSubscription(): Promise<{
+  active: boolean;
+  subscription: import('./api-types').Subscription | null;
+}> {
+  return api('/api/v1/subscriptions/active', { auth: true });
+}
+
+export async function createSubscription(plan: string): Promise<{
+  subscription: import('./api-types').Subscription;
+  message: string;
+}> {
+  return api('/api/v1/subscriptions', { method: 'POST', body: { plan }, auth: true });
+}
+
+export async function confirmSubscriptionPayment(
+  subscriptionId: string,
+  mpesaReceipt?: string,
+): Promise<{ subscription: import('./api-types').Subscription; message: string }> {
+  const receipt = mpesaReceipt ?? `DUMMY-MPESA-${Date.now()}`;
+  return api(`/api/v1/subscriptions/${subscriptionId}/confirm`, {
+    method: 'POST',
+    body: { mpesaReceipt: receipt },
+    auth: true,
+  });
+}
+
+// ── BnB bookings ────────────────────────────────────────────────────
+
+export async function fetchBnbBookings(): Promise<import('./api-types').BnbBooking[]> {
+  return api('/api/v1/bnb/bookings', { auth: true });
+}
+
+export async function createBnbBooking(body: {
+  listingId: string;
+  checkIn: string;
+  checkOut: string;
+  guests?: number;
+}): Promise<{ booking: import('./api-types').BnbBooking; message: string }> {
+  return api('/api/v1/bnb/bookings', { method: 'POST', body, auth: true });
+}
+
+export async function confirmBnbBookingPayment(
+  bookingId: string,
+  mpesaReceipt?: string,
+): Promise<{ booking: import('./api-types').BnbBooking; message: string }> {
+  const receipt = mpesaReceipt ?? `DUMMY-MPESA-${Date.now()}`;
+  return api(`/api/v1/bnb/bookings/${bookingId}/confirm`, {
+    method: 'POST',
+    body: { mpesaReceipt: receipt },
+    auth: true,
+  });
+}
+
+export async function updateProfile(body: {
+  displayName?: string;
+  email?: string | null;
+  county?: string | null;
+  bio?: string | null;
+  avatarUrl?: string | null;
+}): Promise<{ user: UserProfile }> {
+  return api('/api/v1/me/profile', { method: 'PATCH', body, auth: true });
+}
+
+export async function fetchMyFeedback(service?: string): Promise<{ feedback: ServiceFeedback[] }> {
+  const q = service ? `?service=${encodeURIComponent(service)}` : '';
+  return api(`/api/v1/me/feedback${q}`, { auth: true });
 }
 
 // ── Feedback / listing requests ─────────────────────────────────────
@@ -242,4 +339,32 @@ export async function submitFeedback(body: {
   listingId?: string;
 }): Promise<{ feedback: ServiceFeedback }> {
   return api('/api/v1/feedback', { method: 'POST', body, auth: true });
+}
+
+export async function createListingRequest(body: {
+  listingId: string;
+  kind: 'viewing' | 'tour' | 'stay';
+  userNote?: string;
+  pickupMode?: 'taxi' | 'rider';
+}): Promise<{ request: import('./api-types').ListingRequest }> {
+  return api('/api/v1/me/listing-requests', { method: 'POST', body, auth: true });
+}
+
+export async function fetchMyListingRequests(): Promise<{ requests: import('./api-types').ListingRequest[] }> {
+  return api('/api/v1/me/listing-requests', { auth: true });
+}
+
+export async function fetchListingRequest(id: string): Promise<{ request: import('./api-types').ListingRequest }> {
+  return api(`/api/v1/me/listing-requests/${id}`, { auth: true });
+}
+
+export async function replyToListingRequest(
+  id: string,
+  body: string,
+): Promise<{ request: import('./api-types').ListingRequest; message: import('./api-types').ListingRequestMessage }> {
+  return api(`/api/v1/me/listing-requests/${id}/messages`, {
+    method: 'POST',
+    body: { body },
+    auth: true,
+  });
 }

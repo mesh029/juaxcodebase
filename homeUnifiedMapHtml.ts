@@ -293,7 +293,7 @@ export function buildUnifiedHomeServicesMapHtml(
         var fc = { type: 'FeatureCollection', features: featuresFromPoints(activePoints) };
         if (map.getSource('pins')) map.getSource('pins').setData(fc);
         syncPickHighlight();
-        if (refit !== false) fitProximityNice(false);
+        if (refit !== false) fitProximityNice(refit === true);
       }
       window.juaSetViewportPad = function (pad) {
         if (pad && typeof pad === 'object') DATA.viewportPad = pad;
@@ -306,7 +306,10 @@ export function buildUnifiedHomeServicesMapHtml(
         if (banks.rides) BANKS.rides = banks.rides;
         if (banks.destinations) BANKS.destinations = banks.destinations;
         try {
-          if (mapReady) internalApplyMode(homeMode, false);
+          if (mapReady) {
+            internalApplyMode(homeMode, false);
+            fitProximityNice(true);
+          }
         } catch (_) {}
       };
       window.juaSetRidesMapFocus = function (focus) {

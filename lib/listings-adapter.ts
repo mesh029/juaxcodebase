@@ -38,12 +38,17 @@ export type AdaptedHouseListing = {
   has3dTour: boolean;
   locationLocked: boolean;
   description?: string | null;
+  exactAddress?: string;
+  hostName?: string;
+  hostPhone?: string;
+  exactCoords?: Coordinates;
 };
 
 export type AdaptedBnbListing = {
   id: string;
   title: string;
   county: CountyKey;
+  distanceKm: number;
   rating: string;
   price: string;
   image: { uri: string };
@@ -58,6 +63,10 @@ export type AdaptedBnbListing = {
   has3dTour: boolean;
   locationLocked: boolean;
   description?: string | null;
+  exactAddress?: string;
+  hostName?: string;
+  hostPhone?: string;
+  exactCoords?: Coordinates;
 };
 
 export type AdaptedPlaceStation = {
@@ -89,6 +98,10 @@ export function adaptRentalListing(l: PublicListing): AdaptedHouseListing {
     has3dTour: false,
     locationLocked: l.locationLocked,
     description: l.description,
+    exactAddress: l.exactAddress,
+    hostName: l.hostName,
+    hostPhone: l.hostPhone,
+    exactCoords: l.exactPin && !l.locationLocked ? toCoords(l.exactPin) : undefined,
   };
 }
 
@@ -98,6 +111,7 @@ export function adaptBnbListing(l: PublicListing): AdaptedBnbListing {
     id: l.id,
     title: l.title,
     county: toCounty(l.county),
+    distanceKm: l.distanceKm ?? 0,
     rating: '4.8',
     price: `KES ${l.priceKes.toLocaleString()} / ${l.priceUnit}`,
     image: toImageSource(l.coverImageUrl),
@@ -111,6 +125,27 @@ export function adaptBnbListing(l: PublicListing): AdaptedBnbListing {
     has3dTour: false,
     locationLocked: l.locationLocked,
     description: l.description,
+    exactAddress: l.exactAddress,
+    hostName: l.hostName,
+    hostPhone: l.hostPhone,
+    exactCoords: l.exactPin && !l.locationLocked ? toCoords(l.exactPin) : undefined,
+  };
+}
+
+export function mergeListingUnlockFields<T extends AdaptedHouseListing | AdaptedBnbListing>(
+  base: T,
+  live: import('./api-types').PublicListing | null,
+): T {
+  if (!live) return base;
+  const unlocked = !live.locationLocked;
+  return {
+    ...base,
+    locationLocked: live.locationLocked,
+    exactAddress: live.exactAddress ?? base.exactAddress,
+    hostName: live.hostName ?? base.hostName,
+    hostPhone: live.hostPhone ?? base.hostPhone,
+    coords: unlocked && live.exactPin ? toCoords(live.exactPin) : base.coords,
+    exactCoords: unlocked && live.exactPin ? toCoords(live.exactPin) : base.exactCoords,
   };
 }
 

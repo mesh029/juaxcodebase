@@ -1,4 +1,5 @@
 import { StatusBar } from 'expo-status-bar';
+import { Ionicons } from '@expo/vector-icons';
 import { AppIcon, type AppIconName } from './components/ui/AppIcon';
 import { Fragment, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
@@ -58,8 +59,36 @@ import {
 import { MAP_INTERACTION_HTML, MAP_INTERACTION_JS, MAP_INTERACTION_STYLES } from './mapInteractionScript';
 import { useAuth } from './context/AuthContext';
 import { useAppData } from './hooks/useAppData';
-import { createLaundryOrder, estimateLaundryOrder, fetchLaundryOrders, submitFeedback } from './lib/api';
-import type { LaundryOrder, ListingRequest, ListingRequestKind } from './lib/api-types';
+import { createLaundryOrder, estimateLaundryOrder, fetchLaundryOrders, submitFeedback, fetchListingDetail, fetchActiveSubscription, createSubscription, confirmSubscriptionPayment, createBnbBooking, confirmBnbBookingPayment, fetchBnbBookings, fetchMyFeedback, createListingRequest, fetchMyListingRequests, fetchListingRequest, replyToListingRequest } from './lib/api';
+import {
+  isActiveListingRequest,
+  LISTING_REQUEST_STATUS_LABELS,
+  LISTING_REQUEST_STEPS,
+  listingRequestStepIndex,
+  mergeListingRequests,
+  parseListingRequestsFromFeedback,
+} from './lib/listing-requests';
+import { PRODUCTION_TODO } from './lib/production-todos';
+import type { LaundryOrder, ListingRequest, ListingRequestKind, PublicListing, BnbBooking } from './lib/api-types';
+import { mergeListingUnlockFields, adaptBnbListing, type AdaptedBnbListing, type AdaptedHouseListing } from './lib/listings-adapter';
+import { FuaFeedbackCard } from './components/feedback/FuaFeedbackCard';
+import { SubscriptionSheet } from './components/subscription/SubscriptionSheet';
+import { BnbBookingSheet } from './components/booking/BnbBookingSheet';
+import { BookedStaySheet } from './components/booking/BookedStaySheet';
+import { GuidedNavigationModal } from './components/navigation/GuidedNavigationModal';
+import { ListingRequestSheet } from './components/listings/ListingRequestSheet';
+import { ViewingRequestSheet } from './components/listings/ViewingRequestSheet';
+import { ListingDistanceBadge, ListingMetaText } from './components/listings/ListingMetaText';
+import { ListingsExplorePanel } from './components/listings/ListingsExplorePanel';
+import {
+  formatListingDistance,
+  formatListingDistanceLabel,
+  formatListingMetaLine,
+  getListingDistanceReference,
+  hasValidMapCoords,
+  NO_DISTANCE_REFERENCE,
+} from './lib/listings-distance';
+import { ProfileEditor } from './components/profile/ProfileEditor';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
   UIManager.setLayoutAnimationEnabledExperimental(true);
@@ -80,7 +109,7 @@ type HomeDeepPage = null | 'listings' | 'listing-detail' | 'valet-studio' | 'rid
 type ListingCatalog = 'bnb' | 'house';
 type StaySpaceFilter = 'any' | 'entire' | 'room';
 
-type MainTab = 'home' | 'trips' | 'profile';
+type MainTab = 'home' | 'activity' | 'profile';
 type StaysSubTab = 'bnb' | 'rental';
 
 const FEATURED_STAYS_HOME = 5;
@@ -88,7 +117,7 @@ const PULL_REFRESH_THRESHOLD = 64;
 
 const MAIN_TAB_CONFIG: { key: MainTab; label: string; icon: string }[] = [
   { key: 'home', label: 'Home', icon: '⌂' },
-  { key: 'trips', label: 'Trips', icon: '◇' },
+  { key: 'activity', label: 'Activity', icon: '◇' },
   { key: 'profile', label: 'Me', icon: '○' },
 ];
 type ThemeMode = 'light' | 'dark';
@@ -105,6 +134,26 @@ function getDistanceKm(from: Coordinates, to: Coordinates): number {
     Math.cos(toRadians(from.latitude)) * Math.cos(toRadians(to.latitude)) * Math.sin(deltaLon / 2) ** 2;
   return earthRadiusKm * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
+
+function enrichWithDistanceFromUser<T extends { coords: Coordinates }>(
+  rows: T[],
+  from: Coordinates | null,
+): (T & { distanceFromUser: number | null })[] {
+  return rows.map((row) => ({
+    ...row,
+    distanceFromUser: from && hasValidMapCoords(row.coords) ? getDistanceKm(from, row.coords) : null,
+  }));
+}
+
+const ACTIVE_BNB_BOOKING_STATUSES = new Set(['pending_payment', 'confirmed']);
+
+function findActiveBnbBookingForListing(bookings: BnbBooking[], listingId: string): BnbBooking | undefined {
+  return bookings.find((b) => b.listingId === listingId && ACTIVE_BNB_BOOKING_STATUSES.has(b.status));
+}
+
+const LISTING_RADIUS_DEFAULT_KM = 5;
+const STAYS_RADIUS_OPTIONS = [2, 5, 10] as const;
+const LISTING_RADIUS_OPTIONS = STAYS_RADIUS_OPTIONS;
 type Destination = {
   id: string;
   name: string;
@@ -143,6 +192,7 @@ type InteractiveMapOptions = {
 /** In-app live route session (WebView preview; swap for Mapbox Navigation SDK in production). */
 type GuidedJourneyKind = 'station' | 'bnb' | 'house' | 'ride' | 'place' | 'destination';
 type GuidedJourney = {
+  origin: Coordinates;
   end: Coordinates;
   title: string;
   subtitle: string;
@@ -163,11 +213,16 @@ type HouseListing = {
   amenities: string[];
   has3dTour: boolean;
   locationLocked?: boolean;
+  exactAddress?: string;
+  hostName?: string;
+  hostPhone?: string;
+  exactCoords?: Coordinates;
 };
 type BnbListing = {
   id: string;
   title: string;
   county: CountyKey;
+  distanceKm?: number;
   rating: string;
   price: string;
   image: any;
@@ -181,6 +236,10 @@ type BnbListing = {
   amenities: string[];
   has3dTour: boolean;
   locationLocked?: boolean;
+  exactAddress?: string;
+  hostName?: string;
+  hostPhone?: string;
+  exactCoords?: Coordinates;
 };
 /** Curated city spots on Explore (hotels, meetups, retail — demo insight numbers). */
 type ExploreVenueCategory = 'hotel' | 'meetup' | 'fashion' | 'market' | 'culture';
@@ -794,12 +853,60 @@ const buildGuidanceMapHtml = (
               body.innerHTML =
                 '<div class="nav-live">' +
                 '<div class="nav-live-label">On route</div>' +
-                '<div class="nav-live-main">' + progressLine + '</div>' +
-                '<div class="nav-live-caption">Gold line is your path. Your dot updates as you move — the map stays centered on you.</div>' +
+                '<div id="liveEtaMain" class="nav-live-main">' + progressLine + '</div>' +
+                '<div id="liveEtaCaption" class="nav-live-caption">Gold line is your path. Your dot updates as you move — ETA refreshes along the way.</div>' +
                 '<div id="liveBadge" class="nav-live-badge">Starting location…</div>' +
                 '<div class="nav-sdk-note">Voice and lane guidance ship with Mapbox Navigation SDK in production. Turn list below is preview only.</div>' +
                 '</div>' +
                 (stepsHtml ? '<div class="nav-upcoming-label">Along the route</div>' + stepsHtml : '');
+            }
+            function setLiveEta(main, caption) {
+              var mainEl = document.getElementById('liveEtaMain');
+              var capEl = document.getElementById('liveEtaCaption');
+              if (mainEl && main) mainEl.textContent = main;
+              if (capEl && caption) capEl.textContent = caption;
+            }
+            var lastEtaFetch = 0;
+            var lastEtaLat = null;
+            var lastEtaLng = null;
+            function haversineKm(lat1, lon1, lat2, lon2) {
+              var R = 6371;
+              var dLat = (lat2 - lat1) * Math.PI / 180;
+              var dLon = (lon2 - lon1) * Math.PI / 180;
+              var a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon / 2) * Math.sin(dLon / 2);
+              return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            }
+            function refreshEtaFromPosition(lat, lng) {
+              var now = Date.now();
+              var moved = lastEtaLat == null || haversineKm(lastEtaLat, lastEtaLng, lat, lng) > 0.12;
+              if (!moved && now - lastEtaFetch < 25000) return;
+              lastEtaFetch = now;
+              lastEtaLat = lat;
+              lastEtaLng = lng;
+              var etaUrl = 'https://api.mapbox.com/directions/v5/mapbox/driving/' +
+                lng + ',' + lat + ';' + d.longitude + ',' + d.latitude +
+                '?overview=false&access_token=' + NAV.token;
+              fetch(etaUrl)
+                .then(function (r) { return r.json(); })
+                .then(function (json) {
+                  var leg = json && json.routes && json.routes[0];
+                  if (!leg) return;
+                  var remKm = leg.distance ? (leg.distance / 1000).toFixed(1) : null;
+                  var remMin = leg.duration ? Math.max(1, Math.round(leg.duration / 60)) : null;
+                  if (remKm != null && remMin != null) {
+                    setLiveEta(remKm + ' km · about ' + remMin + ' min remaining',
+                      'Updated from your live position · map follows you as you move');
+                    setLiveBadge('Live · ' + remMin + ' min to destination', true);
+                  }
+                })
+                .catch(function () {});
+            }
+            if (navigator.geolocation && navigator.geolocation.watchPosition) {
+              navigator.geolocation.watchPosition(function (pos) {
+                refreshEtaFromPosition(pos.coords.latitude, pos.coords.longitude);
+              }, function () {}, { enableHighAccuracy: true, maximumAge: 4000, timeout: 15000 });
             }
             setTimeout(function () {
               try { if (typeof geo.trigger === 'function') geo.trigger(); } catch (_) {}
@@ -893,6 +1000,7 @@ const IMG = {
   toursHero: U('photo-1528183429752-a97fa0afff39?auto=format&fit=crop&w=960&q=80'),
   spotsHero: U('photo-1566073771259-6a8506099945?auto=format&fit=crop&w=960&q=80'),
   eventsHero: U('photo-1492684223066-81342ee5ff30?auto=format&fit=crop&w=960&q=80'),
+  moversHero: U('photo-1600585154340-be6161a56a0c?auto=format&fit=crop&w=960&q=80'),
   milimani: U('photo-1600047509807-ba8f99d2cdde?auto=format&fit=crop&w=960&q=80'),
   riatHills: U('photo-1600566753086-00f18fb6b3ea?auto=format&fit=crop&w=960&q=80'),
 };
@@ -1485,7 +1593,7 @@ const FALLBACK_PICKUP_STATIONS: PlaceStation[] = [
 
 const PICKUP_RADIUS_KM = 28;
 
-type ComingSoonServiceId = 'rides' | 'cloth_shop' | 'groceries' | 'tours' | 'spots' | 'events';
+type ComingSoonServiceId = 'rides' | 'cloth_shop' | 'groceries' | 'tours' | 'spots' | 'events' | 'movers';
 
 type HomeSegmentId = 'home';
 
@@ -1493,6 +1601,7 @@ type ServiceSegmentId = ServiceType | ComingSoonServiceId | HomeSegmentId;
 
 const COMING_SOON_SEGMENT_IDS: ComingSoonServiceId[] = [
   'rides',
+  'movers',
   'cloth_shop',
   'groceries',
   'tours',
@@ -1508,6 +1617,7 @@ const SERVICE_SEGMENTS: ServiceSegmentItem<ServiceSegmentId>[] = [
   { key: 'laundry', label: 'FUA' },
   { key: 'bnbs', label: 'SAKA KEJA' },
   { key: 'rides', label: 'RIDES', comingSoon: true },
+  { key: 'movers', label: 'MOVERS', comingSoon: true },
   { key: 'tours', label: 'TOURS', comingSoon: true },
   { key: 'spots', label: 'SPOTS', comingSoon: true },
   { key: 'events', label: 'EVENTS', comingSoon: true },
@@ -1529,6 +1639,17 @@ const COMING_SOON_SERVICE_INFO: Record<
       'M-Pesa pay · trip history in Trips & orders',
     ],
     hero: 'ridesHero',
+  },
+  movers: {
+    eyebrow: 'MOVERS',
+    title: 'Jua Movers',
+    lead: 'Moving to a new place without the chaos — we pack carefully, transport your belongings, and help you settle in.',
+    features: [
+      'Professional packing & labelling for fragile items',
+      'Van or truck crew for local & inter-county moves',
+      'Unpacking, basic setup & handover at your new home',
+    ],
+    hero: 'moversHero',
   },
   cloth_shop: {
     eyebrow: 'CLOTH',
@@ -1751,7 +1872,7 @@ const comingSoonHeroSlides = (seg: ComingSoonServiceId): IntroHeroSlide[] => {
   ];
 };
 
-const STAYS_RADIUS_OPTIONS = [2, 5, 10] as const;
+
 const HOUSE_RADIUS_OPTIONS = [2, 5, 10, 15, 25] as const;
 
 const FALLBACK_HOUSE_LISTINGS: HouseListing[] = [
@@ -2159,16 +2280,34 @@ export default function App() {
     mamaFuaConvenienceTimes,
     subscriptionPlans,
     dataLoading,
+    listingsFetching,
     listingsLoaded,
     dataError,
+    listingsError,
     refreshAppData,
+    refreshAllListingsCatalog,
   } = useAppData();
   const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [activeService, setActiveService] = useState<ServiceType>('laundry');
   const [activeSegment, setActiveSegment] = useState<ServiceSegmentId>('home');
   const [staysSubTab, setStaysSubTab] = useState<StaysSubTab>('bnb');
   const [staysRadiusKm, setStaysRadiusKm] = useState<(typeof STAYS_RADIUS_OPTIONS)[number]>(5);
-  const [rentalSubscribed, setRentalSubscribed] = useState(false);
+  const [rentalSubscriptionActive, setRentalSubscriptionActive] = useState(false);
+  const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<string | null>(null);
+  const [subscriptionSheetOpen, setSubscriptionSheetOpen] = useState(false);
+  const [bnbBookingSheetOpen, setBnbBookingSheetOpen] = useState(false);
+  const [bnbBookingTarget, setBnbBookingTarget] = useState<{ id: string; title: string; price: string } | null>(
+    null,
+  );
+  const [bookedStaySheetBooking, setBookedStaySheetBooking] = useState<BnbBooking | null>(null);
+  const [bookedStayListing, setBookedStayListing] = useState<PublicListing | null>(null);
+  const [bookedStayLoading, setBookedStayLoading] = useState(false);
+  const [selectedSubscriptionPlan, setSelectedSubscriptionPlan] = useState<string>('weekly');
+  const listingsInitialLoading = !listingsLoaded && (dataLoading || listingsFetching);
+  const listingsPageLoading = listingsInitialLoading;
+  const [listingDetailLive, setListingDetailLive] = useState<PublicListing | null>(null);
+  const [bnbBookings, setBnbBookings] = useState<BnbBooking[]>([]);
+  const [profileEditOpen, setProfileEditOpen] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>('system');
   const systemColorScheme = useColorScheme();
   const themeMode: ThemeMode =
@@ -2176,7 +2315,7 @@ export default function App() {
   const [currentCoords, setCurrentCoords] = useState<Coordinates | null>(null);
   const [currentLocationLabel, setCurrentLocationLabel] = useState('Locating you...');
   const [currentPickupLocation, setCurrentPickupLocation] = useState('Locating you...');
-  const [currentCounty, setCurrentCounty] = useState<CountyKey>('nairobi');
+  const [currentCounty, setCurrentCounty] = useState<CountyKey | null>(null);
   const [locationError, setLocationError] = useState('');
   const [selectedDestination, setSelectedDestination] = useState<Destination>(DESTINATIONS[0]);
   const [destinationQuery, setDestinationQuery] = useState('');
@@ -2207,6 +2346,17 @@ export default function App() {
   const [serverLaundryEstimate, setServerLaundryEstimate] = useState<number | null>(null);
   const [laundryOrders, setLaundryOrders] = useState<LaundryOrder[]>([]);
   const [listingRequests, setListingRequests] = useState<ListingRequest[]>([]);
+  const [listingRequestSheetId, setListingRequestSheetId] = useState<string | null>(null);
+  const [listingRequestDetail, setListingRequestDetail] = useState<ListingRequest | null>(null);
+  const [listingRequestSheetLoading, setListingRequestSheetLoading] = useState(false);
+  const [listingRequestReplySubmitting, setListingRequestReplySubmitting] = useState(false);
+  const [viewingRequestTarget, setViewingRequestTarget] = useState<{
+    listingId: string;
+    listingTitle: string;
+    catalog: 'bnb' | 'house';
+    priceLabel?: string;
+    closeDeepPage?: boolean;
+  } | null>(null);
   const [orderSubmitting, setOrderSubmitting] = useState(false);
   const [requestSubmitting, setRequestSubmitting] = useState(false);
   const [pullRefreshing, setPullRefreshing] = useState(false);
@@ -2257,9 +2407,7 @@ export default function App() {
   const [listingsViewMode, setListingsViewMode] = useState<'list' | 'map'>('list');
   const [listingsMapSelectedId, setListingsMapSelectedId] = useState<string | null>(null);
   const [staysSheetViewMode, setStaysSheetViewMode] = useState<'list' | 'map'>('list');
-  const [listingCounty, setListingCounty] = useState<ListingCatalogArea>('any');
-  const [listingSpace, setListingSpace] = useState<StaySpaceFilter>('any');
-  const [listingQuery, setListingQuery] = useState('');
+  const [listingCounty, setListingCounty] = useState<ListingCatalogArea>('near_me');
   const [listingRadiusKm, setListingRadiusKm] = useState<(typeof STAYS_RADIUS_OPTIONS)[number]>(5);
   const [valetMamaFuaHome, setValetMamaFuaHome] = useState(false);
   const [valetStudioNotes, setValetStudioNotes] = useState('');
@@ -2280,11 +2428,41 @@ export default function App() {
     isDark: themeMode === 'dark',
   });
 
+  /** County from GPS or profile — never defaults to Kisumu for display/filtering. */
+  const listingsCounty = useMemo((): CountyKey | null => {
+    if (currentCoords) {
+      const detected = detectCountyFromCoords(currentCoords);
+      if (detected) return detected;
+    }
+    const fromProfile = profile?.county ? detectCountyFromText(profile.county) : null;
+    return fromProfile;
+  }, [currentCoords, profile?.county]);
+
+  const countyDisplayLabel = listingsCounty
+    ? `${listingsCounty.charAt(0).toUpperCase()}${listingsCounty.slice(1)}`
+    : locationLoading
+      ? 'Locating your area…'
+      : 'Area unknown';
+
+  const listingAreaChips = useMemo((): ListingCatalogArea[] => {
+    if (!listingsCounty) return ['near_me', 'any'];
+    return ['near_me', 'any', listingsCounty];
+  }, [listingsCounty]);
+
+  const prevGpsCountyRef = useRef<CountyKey | null>(listingsCounty);
+
+  /** GPS when available; otherwise county center; hidden until we know either. */
+  const listingDistanceRef = useMemo(
+    () => getListingDistanceReference(currentCoords, listingsCounty) ?? NO_DISTANCE_REFERENCE,
+    [currentCoords, listingsCounty],
+  );
+
   const pickupDisplayLabel = useMemo(() => {
     if (!draftPickupCoords) return currentLocationLabel;
-    const county = detectCountyFromCoords(draftPickupCoords) ?? currentCounty;
+    const county =
+      detectCountyFromCoords(draftPickupCoords) ?? currentCounty ?? listingsCounty ?? 'kisumu';
     return summarizeLocationFromCoords(draftPickupCoords, county);
-  }, [draftPickupCoords, currentLocationLabel, currentCounty]);
+  }, [draftPickupCoords, currentLocationLabel, currentCounty, listingsCounty]);
 
   const ridePickupDisplayLabel = useMemo(() => {
     if (ridePickupMode === 'station' && ridePickupStationId) {
@@ -2374,7 +2552,11 @@ export default function App() {
     (message: string, opts?: { goTrips?: boolean; autoDismissMs?: number }) => {
       if (bookingToastTimerRef.current) clearTimeout(bookingToastTimerRef.current);
       setBookingMessage(message);
-      if (opts?.goTrips) setActiveTab('trips');
+      if (opts?.goTrips) {
+        setActiveTab('activity');
+        setHomeDeepPage(null);
+        setListingDetail(null);
+      }
       const ms = opts?.autoDismissMs ?? 4000;
       if (ms > 0) {
         bookingToastTimerRef.current = setTimeout(() => setBookingMessage(''), ms);
@@ -2545,6 +2727,7 @@ export default function App() {
           return;
         }
         setGuidedJourney({
+          origin: currentCoords,
           end: { longitude: lng, latitude: lat },
           title: typeof data.title === 'string' && data.title.trim() ? data.title.trim() : 'Destination',
           subtitle: typeof data.subtitle === 'string' ? data.subtitle : '',
@@ -2685,106 +2868,148 @@ export default function App() {
 
   const nearbyStations = useMemo(() => {
     if (!currentCoords) {
+      if (!currentCounty) return pickupStations;
       return pickupStations.filter((station) => station.county === currentCounty);
     }
     return pickupStations.filter(
       (station) => getDistanceKm(currentCoords, station.coords) <= PICKUP_RADIUS_KM,
     );
   }, [currentCoords, currentCounty, pickupStations]);
-  const mapBnbs = useMemo(
-    () => bnbListings.filter((bnb) => bnb.county === currentCounty),
-    [bnbListings, currentCounty],
-  );
-  const mapHouses = useMemo(
-    () => houseListings.filter((house) => house.county === currentCounty),
-    [houseListings, currentCounty],
-  );
+  const mapBnbs = bnbListings;
+  const mapHouses = houseListings;
   const nearbyHouses = useMemo(() => {
     return mapHouses.filter((house) => {
       if (currentCoords) {
         return getDistanceKm(currentCoords, house.coords) <= staysRadiusKm;
       }
+      if (listingsCounty) {
+        return house.county === listingsCounty;
+      }
       return true;
     });
-  }, [mapHouses, currentCoords, staysRadiusKm]);
-  const nearbyBnbs = mapBnbs;
+  }, [mapHouses, currentCoords, staysRadiusKm, listingsCounty]);
+  const nearbyBnbs = useMemo(() => {
+    return mapBnbs.filter((bnb) => {
+      if (currentCoords) {
+        return getDistanceKm(currentCoords, bnb.coords) <= staysRadiusKm;
+      }
+      if (listingsCounty) {
+        return bnb.county === listingsCounty;
+      }
+      return true;
+    });
+  }, [mapBnbs, currentCoords, staysRadiusKm, listingsCounty]);
   const featuredBnbs = useMemo(() => nearbyBnbs.slice(0, FEATURED_STAYS_HOME), [nearbyBnbs]);
   const featuredHouses = useMemo(() => nearbyHouses.slice(0, FEATURED_STAYS_HOME), [nearbyHouses]);
-  /** Home hub — geo-filtered by current pin + stays radius (same as stays sheet). */
-  const hubNearbyHouses = useMemo(() => {
-    if (!currentCoords) return [];
-    return mapHouses.filter((h) => getDistanceKm(currentCoords, h.coords) <= staysRadiusKm);
-  }, [mapHouses, currentCoords, staysRadiusKm]);
-  const hubNearbyBnbs = useMemo(() => {
-    if (!currentCoords) return [];
-    return mapBnbs.filter((b) => getDistanceKm(currentCoords, b.coords) <= staysRadiusKm);
-  }, [mapBnbs, currentCoords, staysRadiusKm]);
+  /** Home hub — nearest listings from GPS or county center when location is off. */
   const hubListingPool = useMemo(() => {
+    const ref = listingDistanceRef.coords;
+    const countyMatch = <T extends { county: string }>(items: T[]) =>
+      listingsCounty ? items.filter((item) => item.county === listingsCounty) : items;
+    const pool = currentCoords
+      ? { houses: houseListings, bnbs: bnbListings }
+      : {
+          houses: countyMatch(houseListings),
+          bnbs: countyMatch(bnbListings),
+        };
     const sortNear = <T extends { coords: Coordinates }>(items: T[]) =>
-      [...items].sort(
-        (a, b) => getDistanceKm(currentCoords!, a.coords) - getDistanceKm(currentCoords!, b.coords),
-      );
-    return { houses: sortNear(hubNearbyHouses), bnbs: sortNear(hubNearbyBnbs) };
-  }, [hubNearbyHouses, hubNearbyBnbs, currentCoords]);
+      [...items]
+        .filter((item) => hasValidMapCoords(item.coords))
+        .sort((a, b) => getDistanceKm(ref, a.coords) - getDistanceKm(ref, b.coords));
+    const withinRadius = <T extends { coords: Coordinates }>(items: T[]) =>
+      currentCoords
+        ? items.filter((item) => getDistanceKm(ref, item.coords) <= staysRadiusKm)
+        : items.slice(0, 12);
+    return {
+      houses: withinRadius(sortNear(pool.houses)),
+      bnbs: withinRadius(sortNear(pool.bnbs)),
+    };
+  }, [houseListings, bnbListings, listingsCounty, listingDistanceRef.coords, currentCoords, staysRadiusKm]);
   const hubPopularListings = useMemo(() => {
     const rows: { id: string; kind: 'bnb' | 'rental'; title: string; subtitle: string; image: { uri: string } }[] =
       [];
     for (const h of hubListingPool.houses) {
+      const dist = formatListingDistanceLabel(h.coords, listingDistanceRef);
       rows.push({
         id: h.id,
         kind: 'rental',
         title: h.title,
-        subtitle: `Rental · ${h.beds} bed · ${h.price}`,
+        subtitle: dist ? `${dist} · ${h.price}` : `Rental · ${h.beds} bed · ${h.price}`,
         image: h.image,
       });
       if (rows.length >= 4) break;
     }
     if (rows.length < 4) {
       for (const b of hubListingPool.bnbs) {
+        const dist = formatListingDistanceLabel(b.coords, listingDistanceRef);
         rows.push({
           id: b.id,
           kind: 'bnb',
           title: b.title,
-          subtitle: `BnB · ${b.rating} · ${b.price}`,
+          subtitle: dist ? `${dist} · ${b.price}` : `BnB · ${b.rating} · ${b.price}`,
           image: b.image,
         });
         if (rows.length >= 4) break;
       }
     }
     return rows;
-  }, [hubListingPool]);
+  }, [hubListingPool, listingDistanceRef]);
   const catalogBnbs = useMemo(() => {
-    let rows = [...bnbListings];
+    let rows = enrichWithDistanceFromUser(bnbListings, listingDistanceRef.coords);
     if (listingCounty === 'near_me') {
-      if (!currentCoords) return [];
-      rows = rows.filter((b) => getDistanceKm(currentCoords, b.coords) <= listingRadiusKm);
+      const ref = listingDistanceRef.coords;
+      const withinRadius = rows.filter((b) => {
+        if (!hasValidMapCoords(b.coords)) return false;
+        return getDistanceKm(ref, b.coords) <= listingRadiusKm;
+      });
+      if (!currentCoords) {
+        rows = withinRadius.filter((b) => !listingsCounty || b.county === listingsCounty);
+      } else if (withinRadius.length > 0) {
+        rows = withinRadius;
+      } else if (listingsCounty) {
+        rows = rows.filter((b) => b.county === listingsCounty);
+      } else {
+        rows = withinRadius;
+      }
     } else if (listingCounty !== 'any') {
       rows = rows.filter((b) => b.county === listingCounty);
     }
-    if (listingQuery.trim()) {
-      const q = listingQuery.trim().toLowerCase();
-      rows = rows.filter(
-        (b) => b.title.toLowerCase().includes(q) || b.exploreReason.toLowerCase().includes(q),
-      );
-    }
-    if (listingSpace === 'room') rows = rows.filter((b) => /\broom|studio|private|shared\b/i.test(b.title));
-    if (listingSpace === 'entire') rows = rows.filter((b) => !/\broom|shared\b/i.test(b.title));
+    rows.sort((a, b) => {
+      if (a.distanceFromUser != null && b.distanceFromUser != null) {
+        return a.distanceFromUser - b.distanceFromUser;
+      }
+      return 0;
+    });
     return rows;
-  }, [listingCounty, listingQuery, listingSpace, currentCoords, listingRadiusKm]);
+  }, [listingCounty, currentCoords, listingRadiusKm, bnbListings, listingDistanceRef.coords, listingsCounty]);
   const catalogHouses = useMemo(() => {
-    let rows = [...houseListings];
+    let rows = enrichWithDistanceFromUser(houseListings, listingDistanceRef.coords);
     if (listingCounty === 'near_me') {
-      if (!currentCoords) return [];
-      rows = rows.filter((h) => getDistanceKm(currentCoords, h.coords) <= listingRadiusKm);
+      const ref = listingDistanceRef.coords;
+      const withinRadius = rows.filter((h) => {
+        if (!hasValidMapCoords(h.coords)) return false;
+        return getDistanceKm(ref, h.coords) <= listingRadiusKm;
+      });
+      if (!currentCoords) {
+        rows = withinRadius.filter((h) => !listingsCounty || h.county === listingsCounty);
+      } else if (withinRadius.length > 0) {
+        rows = withinRadius;
+      } else if (listingsCounty) {
+        rows = rows.filter((h) => h.county === listingsCounty);
+      } else {
+        rows = withinRadius;
+      }
     } else if (listingCounty !== 'any') {
       rows = rows.filter((h) => h.county === listingCounty);
     }
-    if (listingQuery.trim()) {
-      const q = listingQuery.trim().toLowerCase();
-      rows = rows.filter((h) => h.title.toLowerCase().includes(q));
-    }
+    rows.sort((a, b) => {
+      if (a.distanceFromUser != null && b.distanceFromUser != null) {
+        return a.distanceFromUser - b.distanceFromUser;
+      }
+      return 0;
+    });
     return rows;
-  }, [listingCounty, listingQuery, listingRadiusKm, currentCoords]);
+  }, [listingCounty, listingRadiusKm, currentCoords, houseListings, listingDistanceRef.coords, listingsCounty]);
   const listingsMapHighlight = useMemo(() => {
     if (!listingsMapSelectedId) return null;
     if (listingCatalog === 'bnb') {
@@ -2796,11 +3021,18 @@ export default function App() {
   }, [listingsMapSelectedId, listingCatalog, catalogBnbs, catalogHouses]);
   const listingDetailEntity = useMemo((): BnbListing | HouseListing | null => {
     if (!listingDetail) return null;
+    let base: BnbListing | HouseListing | null = null;
     if (listingDetail.kind === 'bnb') {
-      return bnbListings.find((b) => b.id === listingDetail.id) ?? null;
+      base = bnbListings.find((b) => b.id === listingDetail.id) ?? null;
+    } else {
+      base = houseListings.find((h) => h.id === listingDetail.id) ?? null;
     }
-    return houseListings.find((h) => h.id === listingDetail.id) ?? null;
-  }, [listingDetail]);
+    if (!base) return null;
+    return mergeListingUnlockFields(
+      base as AdaptedHouseListing | AdaptedBnbListing,
+      listingDetailLive,
+    ) as BnbListing | HouseListing;
+  }, [listingDetail, bnbListings, houseListings, listingDetailLive]);
   const listingDetailMoreRows = useMemo(() => {
     if (!listingDetail) return [];
     const pool = listingDetail.kind === 'bnb' ? catalogBnbs : catalogHouses;
@@ -2818,7 +3050,9 @@ export default function App() {
       : tourSheetTarget?.kind === 'house'
         ? houseListings.find((h) => h.id === tourSheetTarget.id) ?? null
         : null;
-  const countyDestinations = DESTINATIONS.filter((destination) => destination.county === currentCounty);
+  const countyDestinations = currentCounty
+    ? DESTINATIONS.filter((destination) => destination.county === currentCounty)
+    : DESTINATIONS;
   const popularNearbyDestinations = useMemo(() => {
     if (countyDestinations.length > 0) return countyDestinations;
     if (!currentCoords) return DESTINATIONS.filter((d) => !!d.county).slice(0, 4);
@@ -2844,6 +3078,7 @@ export default function App() {
     if (currentCoords) {
       return EXPLORE_VENUES.filter((v) => getDistanceKm(currentCoords, v.coords) <= listingRadiusKm);
     }
+    if (!currentCounty) return EXPLORE_VENUES;
     return EXPLORE_VENUES.filter((v) => v.county === currentCounty);
   }, [exploreScope, currentCoords, listingRadiusKm, currentCounty]);
   const exploreJournalArticles = useMemo(() => {
@@ -3065,24 +3300,34 @@ export default function App() {
 
   const listingsMapHtml = useMemo(() => {
     if (!MAPBOX_ACCESS_TOKEN) return null;
-    const rows = listingCatalog === 'bnb' ? catalogBnbs : catalogHouses;
-    const pins: HomeUnifiedPin[] = rows.map((row) =>
-      listingCatalog === 'bnb'
+    const rows = (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).filter((row) =>
+      hasValidMapCoords(row.coords),
+    );
+    const pins: HomeUnifiedPin[] = rows.map((row) => {
+      const dist =
+        'distanceFromUser' in row && row.distanceFromUser != null
+          ? formatListingDistance(row.distanceFromUser)
+          : null;
+      return listingCatalog === 'bnb'
         ? {
-            id: (row as BnbListing).id,
+            id: (row as BnbListing & { distanceFromUser: number | null }).id,
             title: (row as BnbListing).title,
-            subtitle: `${(row as BnbListing).county} · ${(row as BnbListing).rating} ★ · ${(row as BnbListing).price}`,
+            subtitle: dist
+              ? `${dist} · ${(row as BnbListing).price}`
+              : `${(row as BnbListing).county} · ${(row as BnbListing).rating} ★ · ${(row as BnbListing).price}`,
             coords: (row as BnbListing).coords,
             kind: 'bnb' as const,
           }
         : {
-            id: (row as HouseListing).id,
+            id: (row as HouseListing & { distanceFromUser: number | null }).id,
             title: (row as HouseListing).title,
-            subtitle: `${(row as HouseListing).distanceKm} km · ${(row as HouseListing).price}`,
+            subtitle: dist
+              ? `${dist} · ${(row as HouseListing).price}`
+              : `${(row as HouseListing).price}`,
             coords: (row as HouseListing).coords,
             kind: 'house' as const,
-          },
-    );
+          };
+    });
     const banks: HomeUnifiedBanks = {
       laundry: [],
       bnbs: listingCatalog === 'bnb' ? pins : [],
@@ -3138,10 +3383,59 @@ export default function App() {
     [],
   );
 
+  const listingsMapPinKey = useMemo(() => {
+    const rows = listingCatalog === 'bnb' ? catalogBnbs : catalogHouses;
+    return `${listingCatalog}:${rows.map((row) => row.id).join('|')}`;
+  }, [listingCatalog, catalogBnbs, catalogHouses]);
+
   const injectListingsMapSync = useCallback(() => {
     const wv = listingsMapWebViewRef.current;
     if (!wv || !MAPBOX_ACCESS_TOKEN || !listingsMapHtml) return;
     const mode = listingCatalog === 'bnb' ? 'bnbs' : 'houses';
+    const rows = (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).filter((row) =>
+      hasValidMapCoords(row.coords),
+    );
+    const banksJson = JSON.stringify({
+      laundry: [],
+      bnbs:
+        listingCatalog === 'bnb'
+          ? rows.map((row) => {
+              const dist =
+                'distanceFromUser' in row && row.distanceFromUser != null
+                  ? formatListingDistance(row.distanceFromUser)
+                  : null;
+              return {
+                id: row.id,
+                title: row.title,
+                subtitle: dist
+                  ? `${dist} · ${(row as BnbListing).price}`
+                  : `${(row as BnbListing).county} · ${(row as BnbListing).rating} ★ · ${(row as BnbListing).price}`,
+                kind: 'bnb',
+                coords: [row.coords.longitude, row.coords.latitude],
+              };
+            })
+          : [],
+      houses:
+        listingCatalog === 'house'
+          ? rows.map((row) => {
+              const dist =
+                'distanceFromUser' in row && row.distanceFromUser != null
+                  ? formatListingDistance(row.distanceFromUser)
+                  : null;
+              return {
+                id: row.id,
+                title: row.title,
+                subtitle: dist
+                  ? `${dist} · ${(row as HouseListing).price}`
+                  : `${(row as HouseListing).price}`,
+                kind: 'house',
+                coords: [row.coords.longitude, row.coords.latitude],
+              };
+            })
+          : [],
+      rides: [],
+      destinations: [],
+    });
     const hl = listingsMapHighlight;
     const hlJs =
       hl != null
@@ -3151,14 +3445,16 @@ export default function App() {
       ? `if(window.juaSetUserCoords)window.juaSetUserCoords({longitude:${currentCoords.longitude},latitude:${currentCoords.latitude}});`
       : '';
     wv.injectJavaScript(
-      `setTimeout(function(){try{if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
+      `setTimeout(function(){try{if(window.juaUpdatePinBanks)window.juaUpdatePinBanks(${banksJson});if(window.juaApplyHomeMode)window.juaApplyHomeMode(${JSON.stringify(
         mode,
-      )}, false);${hlJs}${userJs}}catch(e){}},80);true;`,
+      )}, true);${hlJs}${userJs}}catch(e){}},80);true;`,
     );
   }, [
     MAPBOX_ACCESS_TOKEN,
     listingsMapHtml,
     listingCatalog,
+    catalogBnbs,
+    catalogHouses,
     listingsMapHighlight,
     currentCoords,
   ]);
@@ -3366,10 +3662,42 @@ export default function App() {
     currentCoords,
   ]);
 
+  const refreshListingsForArea = useCallback(() => {
+    void refreshAllListingsCatalog();
+  }, [refreshAllListingsCatalog]);
+
+  const handleListingCountyChange = useCallback((key: string) => {
+    setListingCounty(key as ListingCatalogArea);
+  }, []);
+
   useEffect(() => {
     if (staysSheetViewMode !== 'map' || homeDeepPage !== null) return;
     injectMapHighlight(staysHomeMapWebViewRef, staysHomeMapHighlight);
   }, [staysSheetViewMode, homeDeepPage, staysHomeMapHighlight, injectMapHighlight, selectedBnbId, selectedHouseId]);
+
+  useEffect(() => {
+    const prev = prevGpsCountyRef.current;
+    if (prev !== listingsCounty) {
+      if (listingCounty === prev && listingsCounty) {
+        setListingCounty(listingsCounty);
+      }
+      prevGpsCountyRef.current = listingsCounty;
+    }
+  }, [listingsCounty, listingCounty]);
+
+  /** Full pilot catalog loads once on mount in useAppData — no duplicate retries here. */
+
+  useEffect(() => {
+    if (currentCoords) return;
+    const fromProfile = profile?.county ? detectCountyFromText(profile.county) : null;
+    if (fromProfile) setCurrentCounty(fromProfile);
+  }, [profile?.county, currentCoords]);
+
+  useEffect(() => {
+    if (homeDeepPage === 'listings') {
+      if (!currentCoords) void fetchCurrentLocation();
+    }
+  }, [homeDeepPage, listingCounty, currentCoords]);
 
   useEffect(() => {
     if (homeDeepPage === 'service-map') {
@@ -3385,7 +3713,7 @@ export default function App() {
 
   useEffect(() => {
     setListingsMapSelectedId(null);
-  }, [listingCatalog, listingCounty, listingQuery, listingSpace, listingRadiusKm]);
+  }, [listingCatalog, listingCounty, listingRadiusKm]);
 
   useEffect(() => {
     if (homeDeepPage === 'listings' && listingsViewMode === 'map') {
@@ -3397,6 +3725,8 @@ export default function App() {
     listingsViewMode,
     injectListingsMapSync,
     listingCatalog,
+    listingCounty,
+    listingRadiusKm,
     catalogBnbs,
     catalogHouses,
     currentCoords,
@@ -3432,7 +3762,7 @@ export default function App() {
   }, [servicePhase.rides, homeSheetStage, setHomeSheetStageAnimated]);
 
   const guidanceMapHtml = useMemo(() => {
-    if (!MAPBOX_ACCESS_TOKEN || !currentCoords || !guidedJourney) return null;
+    if (!MAPBOX_ACCESS_TOKEN || !guidedJourney) return null;
     const ui: GuidanceUiTheme = {
       canvas: theme.canvas,
       surface: theme.sheet,
@@ -3444,13 +3774,22 @@ export default function App() {
     return buildGuidanceMapHtml(
       MAPBOX_ACCESS_TOKEN,
       theme.mapStyleId,
-      currentCoords,
+      guidedJourney.origin,
       guidedJourney.end,
       guidedJourney.title,
       guidedJourney.subtitle,
       ui,
     );
-  }, [MAPBOX_ACCESS_TOKEN, theme.mapStyleId, theme.canvas, theme.sheet, theme.textPrimary, theme.textMuted, themeMode, currentCoords, guidedJourney]);
+  }, [
+    MAPBOX_ACCESS_TOKEN,
+    theme.mapStyleId,
+    theme.canvas,
+    theme.sheet,
+    theme.textPrimary,
+    theme.textMuted,
+    themeMode,
+    guidedJourney,
+  ]);
 
   const isInKenya = (coords: Coordinates) =>
     coords.latitude >= -5.2 &&
@@ -3484,12 +3823,15 @@ export default function App() {
     setCurrentCoords(coords);
     const countyFromCoords = countyHint ?? detectCountyFromCoords(coords);
     if (countyFromCoords) setCurrentCounty(countyFromCoords);
-    const displayName = summarizeLocationFromCoords(coords, countyFromCoords || currentCounty);
+    const displayName = summarizeLocationFromCoords(
+      coords,
+      countyFromCoords || currentCounty || listingsCounty || 'kisumu',
+    );
     const preciseCoords = `${coords.latitude.toFixed(6)}, ${coords.longitude.toFixed(6)}`;
     setCurrentLocationLabel(displayName);
     setCurrentPickupLocation(preciseCoords);
     setLocationError('');
-  }, [currentCounty]);
+  }, [currentCounty, listingsCounty]);
 
   const geocodeLocationLabel = useCallback(
     async (coords: Coordinates) => {
@@ -3721,6 +4063,30 @@ export default function App() {
     fetchCurrentLocation();
   }, []);
 
+  const reloadListingRequests = useCallback(async () => {
+    if (!isAuthed) {
+      setListingRequests([]);
+      return;
+    }
+    try {
+      const { requests } = await fetchMyListingRequests();
+      try {
+        const { feedback } = await fetchMyFeedback();
+        const legacy = parseListingRequestsFromFeedback(feedback);
+        setListingRequests(mergeListingRequests(requests, legacy));
+      } catch {
+        setListingRequests(requests);
+      }
+    } catch {
+      try {
+        const { feedback } = await fetchMyFeedback();
+        setListingRequests(parseListingRequestsFromFeedback(feedback));
+      } catch {
+        /* keep existing */
+      }
+    }
+  }, [isAuthed]);
+
   const reloadLaundryOrders = useCallback(async () => {
     if (!isAuthed) return;
     try {
@@ -3731,25 +4097,86 @@ export default function App() {
     }
   }, [isAuthed]);
 
+  const reloadSubscription = useCallback(async () => {
+    if (!isAuthed) {
+      setRentalSubscriptionActive(false);
+      setActiveSubscriptionPlan(null);
+      return;
+    }
+    try {
+      const { active, subscription } = await fetchActiveSubscription();
+      setRentalSubscriptionActive(active);
+      setActiveSubscriptionPlan(subscription?.plan ?? null);
+    } catch {
+      setRentalSubscriptionActive(false);
+    }
+  }, [isAuthed]);
+
+  const reloadBnbBookings = useCallback(async () => {
+    if (!isAuthed) return;
+    try {
+      const bookings = await fetchBnbBookings();
+      setBnbBookings(bookings);
+    } catch {
+      /* keep existing */
+    }
+  }, [isAuthed]);
+
   useEffect(() => {
-    if (isAuthed) void reloadLaundryOrders();
-  }, [isAuthed, reloadLaundryOrders]);
+    if (!isAuthed) return;
+    void (async () => {
+      await reloadLaundryOrders();
+      await reloadSubscription();
+      await reloadBnbBookings();
+      await reloadListingRequests();
+    })();
+  }, [isAuthed, reloadLaundryOrders, reloadSubscription, reloadBnbBookings, reloadListingRequests]);
+
+  useEffect(() => {
+    if (!listingDetail) {
+      setListingDetailLive(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const detail = await fetchListingDetail(listingDetail.id);
+        if (!cancelled) setListingDetailLive(detail);
+      } catch {
+        if (!cancelled) setListingDetailLive(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [listingDetail?.id, isAuthed, rentalSubscriptionActive, bnbBookings.length]);
 
   const handlePullRefresh = useCallback(async () => {
     setPullRefreshing(true);
     setPullProgress(1);
     try {
-      // Sequential — parallel refresh was opening many Vercel/DB connections at once.
-      await refreshAppData();
+      // Sequential — parallel requests exhaust Vercel/Aiven DB connection budget.
+      await refreshAppData('pilot');
       if (isAuthed) {
         await reloadLaundryOrders();
+        await reloadSubscription();
+        await reloadBnbBookings();
+        await reloadListingRequests();
         await refreshProfile();
       }
     } finally {
       setPullRefreshing(false);
       setPullProgress(0);
     }
-  }, [refreshAppData, isAuthed, reloadLaundryOrders, refreshProfile]);
+  }, [
+    refreshAppData,
+    isAuthed,
+    reloadLaundryOrders,
+    reloadSubscription,
+    reloadBnbBookings,
+    reloadListingRequests,
+    refreshProfile,
+  ]);
 
   const onSheetScroll = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -3806,47 +4233,83 @@ export default function App() {
       listingId: string,
       listingTitle: string,
       catalog: 'bnb' | 'house',
-      opts?: { closeDeepPage?: boolean },
+      opts?: { closeDeepPage?: boolean; pickupMode?: 'taxi' | 'rider'; userNote?: string },
     ) => {
       if (!isAuthed) {
         setBookingMessage('Sign in to request tours, viewings, and stays');
         return;
       }
       setRequestSubmitting(true);
+      const service = catalog === 'bnb' ? 'bnb' : 'rental';
+      const title =
+        kind === 'tour' ? '3D tour request' : kind === 'viewing' ? 'Viewing request' : 'Stay reservation';
       try {
-        const service = catalog === 'bnb' ? 'bnb' : 'rental';
-        const title =
-          kind === 'tour' ? '3D tour request' : kind === 'viewing' ? 'Viewing request' : 'Stay reservation';
-        const body = `I would like to request a ${kind} for "${listingTitle}". Please follow up via the app.`;
-        const { feedback } = await submitFeedback({
-          service,
-          category: 'suggestion',
-          title,
-          body,
+        const { request } = await createListingRequest({
           listingId,
+          kind,
+          pickupMode: kind === 'viewing' ? opts?.pickupMode : undefined,
+          userNote: opts?.userNote,
         });
         setListingRequests((prev) => {
-          if (prev.some((r) => r.id === feedback.id)) return prev;
-          return [
-            {
-              id: feedback.id,
-              listingId,
-              listingTitle,
-              kind,
-              status: feedback.status,
-              createdAt: feedback.createdAt,
-            },
-            ...prev,
-          ];
+          if (prev.some((r) => r.id === request.id)) return prev;
+          return [request, ...prev];
         });
-        flashBookingNotice(`${title} submitted — check Trips`, { goTrips: true });
+        setViewingRequestTarget(null);
+        flashBookingNotice(`${title} submitted — track updates in Activity`, { goTrips: true });
         setPhaseForService('bnbs', 'confirmed');
         if (opts?.closeDeepPage) {
           setHomeDeepPage(null);
           setListingDetail(null);
         }
-      } catch (err) {
-        setBookingMessage(err instanceof Error ? err.message : 'Could not submit request — try again');
+      } catch (primaryErr) {
+        try {
+          const pickupLine =
+            kind === 'viewing' && opts?.pickupMode
+              ? ` Pickup preference: ${opts.pickupMode === 'taxi' ? 'car/taxi' : 'motorbike rider'}.`
+              : '';
+          const noteLine = opts?.userNote ? ` Note: ${opts.userNote}` : '';
+          const body = `I would like to request a ${kind} for "${listingTitle}".${pickupLine}${noteLine} Please follow up via the app.`;
+          const { feedback } = await submitFeedback({
+            service,
+            category: 'suggestion',
+            title,
+            body,
+            listingId,
+          });
+          setListingRequests((prev) => {
+            if (prev.some((r) => r.id === feedback.id)) return prev;
+            return [
+              {
+                id: feedback.id,
+                listingId,
+                listingTitle,
+                kind,
+                service,
+                status: feedback.status === 'new' ? 'requested' : feedback.status,
+                statusLabel: LISTING_REQUEST_STATUS_LABELS.requested,
+                pickupMode: opts?.pickupMode ?? null,
+                pickupModeLabel: opts?.pickupMode
+                  ? opts.pickupMode === 'taxi'
+                    ? 'Car / taxi pickup'
+                    : 'Motorbike rider'
+                  : null,
+                createdAt: feedback.createdAt,
+              },
+              ...prev,
+            ];
+          });
+          setViewingRequestTarget(null);
+          flashBookingNotice(`${title} submitted — check Activity`, { goTrips: true });
+          setPhaseForService('bnbs', 'confirmed');
+          if (opts?.closeDeepPage) {
+            setHomeDeepPage(null);
+            setListingDetail(null);
+          }
+        } catch (fallbackErr) {
+          setBookingMessage(
+            fallbackErr instanceof Error ? fallbackErr.message : 'Could not submit request — try again',
+          );
+        }
       } finally {
         setRequestSubmitting(false);
       }
@@ -3854,34 +4317,255 @@ export default function App() {
     [flashBookingNotice, isAuthed],
   );
 
-  const subscribeToKeja = useCallback(async () => {
+  const openViewingRequestSheet = useCallback(
+    (
+      listingId: string,
+      listingTitle: string,
+      catalog: 'bnb' | 'house',
+      opts?: { closeDeepPage?: boolean; priceLabel?: string },
+    ) => {
+      if (!isAuthed) {
+        setBookingMessage('Sign in to request viewings');
+        return;
+      }
+      if (catalog === 'house' && !rentalSubscriptionActive) {
+        setSubscriptionSheetOpen(true);
+        return;
+      }
+      setViewingRequestTarget({ listingId, listingTitle, catalog, ...opts });
+    },
+    [isAuthed, rentalSubscriptionActive],
+  );
+
+  const requestRideToListing = useCallback(
+    async (listingId: string, listingTitle: string, catalog: 'bnb' | 'house') => {
+      if (!isAuthed) {
+        setBookingMessage('Sign in to request a ride');
+        return;
+      }
+      setRequestSubmitting(true);
+      try {
+        await submitFeedback({
+          service: catalog === 'bnb' ? 'bnb' : 'rental',
+          category: 'suggestion',
+          title: 'Ride to listing',
+          body: `Please arrange a Jua ride to "${listingTitle}" for my viewing/stay.`,
+          listingId,
+        });
+        flashBookingNotice('Ride request submitted — check Activity', { goTrips: true });
+      } catch (err) {
+        setBookingMessage(err instanceof Error ? err.message : 'Could not request ride');
+      } finally {
+        setRequestSubmitting(false);
+      }
+    },
+    [isAuthed, flashBookingNotice],
+  );
+
+  const beginGuidedJourney = useCallback(
+    (opts: { end: Coordinates; title: string; subtitle: string; kind: GuidedJourneyKind }) => {
+      if (!MAPBOX_ACCESS_TOKEN) {
+        setBookingMessage('Add EXPO_PUBLIC_MAPBOX_TOKEN for navigation.');
+        return false;
+      }
+      if (!currentCoords) {
+        setBookingMessage('We need your location — tap the location pill first.');
+        void fetchCurrentLocation();
+        return false;
+      }
+      setGuidedJourney({ ...opts, origin: currentCoords });
+      return true;
+    },
+    [MAPBOX_ACCESS_TOKEN, currentCoords],
+  );
+
+  const startGuidedToListing = useCallback(
+    (entity: HouseListing | BnbListing, kind: 'house' | 'bnb') => {
+      const end = entity.exactCoords ?? entity.coords;
+      beginGuidedJourney({
+        end,
+        title: entity.title,
+        subtitle:
+          kind === 'bnb'
+            ? `${entity.county} · ${(entity as BnbListing).price}`
+            : `${(entity as HouseListing).distanceKm} km · ${entity.price}`,
+        kind,
+      });
+    },
+    [beginGuidedJourney],
+  );
+
+  const openBookedStayDetail = useCallback(
+    async (bookingId: string) => {
+      const booking = bnbBookings.find((b) => b.id === bookingId);
+      if (!booking) return;
+      setBookedStaySheetBooking(booking);
+      setBookedStayListing(null);
+      setBookedStayLoading(true);
+      try {
+        const detail = await fetchListingDetail(booking.listingId);
+        setBookedStayListing(detail);
+      } catch (err) {
+        setBookingMessage(err instanceof Error ? err.message : 'Could not load stay details');
+        setBookedStaySheetBooking(null);
+      } finally {
+        setBookedStayLoading(false);
+      }
+    },
+    [bnbBookings],
+  );
+
+  const openListingRequestDetail = useCallback(
+    async (requestId: string) => {
+      setListingRequestSheetId(requestId);
+      const cached = listingRequests.find((r) => r.id === requestId) ?? null;
+      setListingRequestDetail(cached);
+      setListingRequestSheetLoading(true);
+      try {
+        const { request } = await fetchListingRequest(requestId);
+        setListingRequestDetail(request);
+        setListingRequests((prev) => prev.map((r) => (r.id === request.id ? request : r)));
+      } catch {
+        if (!cached) {
+          setListingRequestSheetId(null);
+          setListingRequestDetail(null);
+          setBookingMessage('Could not load request details');
+        }
+      } finally {
+        setListingRequestSheetLoading(false);
+      }
+    },
+    [listingRequests],
+  );
+
+  const handleListingRequestReply = useCallback(
+    async (body: string) => {
+      if (!listingRequestSheetId) return;
+      setListingRequestReplySubmitting(true);
+      try {
+        const { request } = await replyToListingRequest(listingRequestSheetId, body);
+        setListingRequestDetail(request);
+        setListingRequests((prev) => prev.map((r) => (r.id === request.id ? request : r)));
+      } catch (err) {
+        setBookingMessage(err instanceof Error ? err.message : 'Could not send reply');
+        throw err;
+      } finally {
+        setListingRequestReplySubmitting(false);
+      }
+    },
+    [listingRequestSheetId],
+  );
+
+  const startTripToBookedStay = useCallback(() => {
+    if (!bookedStayListing || !bookedStaySheetBooking) return;
+    const entity = adaptBnbListing(bookedStayListing);
+    const end = entity.exactCoords ?? entity.coords;
+    const started = beginGuidedJourney({
+      end,
+      title: entity.title,
+      subtitle: `${bookedStaySheetBooking.checkIn} → ${bookedStaySheetBooking.checkOut} · check-in`,
+      kind: 'bnb',
+    });
+    if (started) {
+      setBookedStaySheetBooking(null);
+      setBookedStayListing(null);
+    }
+  }, [bookedStayListing, bookedStaySheetBooking, beginGuidedJourney]);
+
+  const openBnbBooking = useCallback((id: string, title: string, price: string) => {
     if (!isAuthed) {
-      setBookingMessage('Sign in to unlock rentals and request viewings');
+      setBookingMessage('Sign in to reserve a stay');
       return;
     }
-    const plan = subscriptionPlans[0];
+    const existing = findActiveBnbBookingForListing(bnbBookings, id);
+    if (existing) {
+      void openBookedStayDetail(existing.id);
+      return;
+    }
+    setBnbBookingTarget({ id, title, price });
+    setBnbBookingSheetOpen(true);
+  }, [isAuthed, bnbBookings, openBookedStayDetail]);
+
+  const subscribeToKeja = useCallback(async (planId?: string) => {
+    if (!isAuthed) {
+      throw new Error('Sign in to unlock rentals and request viewings');
+    }
+    const planKey = planId ?? selectedSubscriptionPlan;
+    const plan = subscriptionPlans.find((p) => p.plan === planKey) ?? subscriptionPlans[0];
+    if (!plan) {
+      throw new Error('Subscription plans unavailable');
+    }
     setRequestSubmitting(true);
     try {
-      await submitFeedback({
-        service: 'rental',
-        category: 'suggestion',
-        title: 'Subscription interest',
-        body: `Interested in ${plan?.label ?? 'Weekly'} plan (KES ${plan?.priceKes ?? 299}) to unlock exact locations and request viewings.`,
-      });
-      setRentalSubscribed(true);
-      setBookingMessage('Subscription request sent — you can now request viewings');
+      const { subscription } = await createSubscription(plan.plan);
+      // PRODUCTION_TODO: real M-Pesa STK — lib/production-todos.ts MPESA_SUBSCRIPTION
+      const dummyReceipt = `DUMMY-MPESA-${Date.now()}`;
+      const { subscription: paid } = await confirmSubscriptionPayment(subscription.id, dummyReceipt);
+      setRentalSubscriptionActive(paid.active);
+      setActiveSubscriptionPlan(paid.plan);
+      setSubscriptionSheetOpen(false);
+      flashBookingNotice('Subscription active — rental locations unlocked');
+      if (listingDetail?.kind === 'house') {
+        const detail = await fetchListingDetail(listingDetail.id);
+        setListingDetailLive(detail);
+      }
+      await refreshProfile();
     } catch (err) {
-      setBookingMessage(err instanceof Error ? err.message : 'Could not submit subscription request');
+      const msg = err instanceof Error ? err.message : 'Could not subscribe';
+      setBookingMessage(msg);
+      throw err;
     } finally {
       setRequestSubmitting(false);
     }
-  }, [isAuthed, subscriptionPlans]);
+  }, [isAuthed, subscriptionPlans, selectedSubscriptionPlan, flashBookingNotice, listingDetail, refreshProfile]);
+
+  const bookBnbStay = useCallback(
+    async (listingId: string, listingTitle: string, opts?: { stayOnListing?: boolean }) => {
+      if (!isAuthed) {
+        throw new Error('Sign in to reserve a stay');
+      }
+      const checkIn = new Date();
+      checkIn.setDate(checkIn.getDate() + 1);
+      const checkOut = new Date(checkIn);
+      checkOut.setDate(checkOut.getDate() + 2);
+      setRequestSubmitting(true);
+      try {
+        const { booking } = await createBnbBooking({
+          listingId,
+          checkIn: checkIn.toISOString().slice(0, 10),
+          checkOut: checkOut.toISOString().slice(0, 10),
+          guests: 2,
+        });
+        const dummyReceipt = `DUMMY-MPESA-${Date.now()}`;
+        const { booking: confirmed } = await confirmBnbBookingPayment(booking.id, dummyReceipt);
+        setBnbBookings((prev) => [confirmed, ...prev.filter((b) => b.id !== confirmed.id)]);
+        setBnbBookingSheetOpen(false);
+        setBnbBookingTarget(null);
+        const detail = await fetchListingDetail(listingId);
+        setListingDetailLive(detail);
+        flashBookingNotice(
+          opts?.stayOnListing
+            ? 'Stay booked — exact address unlocked below'
+            : `Stay booked — ${listingTitle}`,
+          { goTrips: !opts?.stayOnListing },
+        );
+        await refreshProfile();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Could not book stay';
+        setBookingMessage(msg);
+        throw err;
+      } finally {
+        setRequestSubmitting(false);
+      }
+    },
+    [isAuthed, flashBookingNotice, refreshProfile],
+  );
 
   const buildLaundryOrderBody = useCallback(() => {
     const scheduleDate = new Date().toISOString().slice(0, 10);
     const scheduleBand = valetStudioWhen;
     const base = {
-      pickupCounty: currentCounty,
+      pickupCounty: currentCounty ?? listingsCounty ?? 'kisumu',
       scheduleDate,
       scheduleBand,
       notes: valetStudioNotes.trim() || undefined,
@@ -5144,7 +5828,7 @@ export default function App() {
           </>
         );
       }
-      if (activeTab === 'trips') {
+      if (activeTab === 'activity') {
         const activeOrders = laundryOrders.filter(
           (o) => !['delivered', 'cancelled'].includes(o.status),
         );
@@ -5154,7 +5838,8 @@ export default function App() {
         const pendingPayments = laundryOrders.filter(
           (o) => o.paymentStatus === 'pending' || o.paymentStatus === 'unpaid',
         );
-        const openRequests = listingRequests.filter((r) => r.status === 'new' || r.status === 'reviewed');
+        const openRequests = listingRequests.filter((r) => isActiveListingRequest(r.status));
+        const listingRequestStepLabels = LISTING_REQUEST_STEPS.map((s) => LISTING_REQUEST_STATUS_LABELS[s]);
 
         const activeItems = [
           ...activeOrders.map((order) => ({
@@ -5167,21 +5852,19 @@ export default function App() {
             step: order.currentStep,
             steps: order.steps,
           })),
-          ...openRequests.map((req) => ({
-            type: 'stay' as const,
-            id: req.id,
-            title:
-              req.kind === 'tour'
-                ? `Tour · ${req.listingTitle}`
-                : req.kind === 'viewing'
-                  ? `Viewing · ${req.listingTitle}`
-                  : `Stay · ${req.listingTitle}`,
-            sub: `${req.status} · awaiting follow-up`,
-            payment: '—',
-            amount: '—',
-            step: 0,
-            steps: ['Requested', 'Agent contact', 'Scheduled', 'Done'],
-          })),
+          ...bnbBookings
+            .filter((b) => b.status === 'confirmed' || b.status === 'pending_payment')
+            .map((b) => ({
+              type: 'stay' as const,
+              id: b.id,
+              listingId: b.listingId,
+              title: b.listing?.title ?? 'BnB stay',
+              sub: `${b.checkIn} → ${b.checkOut} · ${String(b.status ?? 'pending').replace(/_/g, ' ')}`,
+              payment: b.paymentStatus ?? 'pending',
+              amount: `KES ${Number(b.totalKes ?? 0).toLocaleString()}`,
+              step: b.confirmed ? 2 : 0,
+              steps: ['Booked', 'Paid', 'Check-in', 'Done'],
+            })),
         ];
 
         const historyItems = [
@@ -5192,34 +5875,127 @@ export default function App() {
             amount: `KES ${order.totalKes.toLocaleString()}`,
             payment: order.paymentStatus ?? 'pending',
           })),
+          ...bnbBookings
+            .filter((b) => b.status === 'completed' || b.status === 'cancelled')
+            .map((b) => ({
+              kind: 'stay' as const,
+              id: b.id,
+              listingId: b.listingId,
+              status: b.status,
+              title: b.listing?.title ?? 'BnB stay',
+              date: new Date(b.createdAt).toLocaleDateString('en-KE', { month: 'short', day: 'numeric' }),
+              amount: `KES ${Number(b.totalKes ?? 0).toLocaleString()}`,
+              payment: b.paymentStatus ?? '—',
+            })),
           ...listingRequests
-            .filter((r) => r.status === 'resolved')
+            .filter((r) => !isActiveListingRequest(r.status))
             .map((r) => ({
+              kind: 'listing_request' as const,
               id: r.id,
-              title: r.listingTitle,
+              title:
+                r.kind === 'tour'
+                  ? `BnB tour · ${r.listingTitle}`
+                  : r.kind === 'viewing'
+                    ? `House viewing · ${r.listingTitle}`
+                    : `Stay · ${r.listingTitle}`,
               date: new Date(r.createdAt).toLocaleDateString('en-KE', { month: 'short', day: 'numeric' }),
               amount: '—',
-              payment: '—',
+              payment: r.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[r.status] ?? r.status,
             })),
         ];
 
         return (
           <>
-            <Text style={styles.makeTripsTitle}>My Trips</Text>
+            <Text style={styles.makeTripsTitle}>My Activity</Text>
+            <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
+              Laundry, stays, listing requests & trips — all in one place.
+            </Text>
             {!isAuthed ? (
               <Text style={[styles.juxHintMuted, { marginBottom: 16 }]}>Sign in to track orders and requests.</Text>
+            ) : rentalSubscriptionActive ? (
+              <View style={[styles.makeTripCard, { backgroundColor: theme.mutedSurface, marginBottom: 12 }]}>
+                <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
+                  Saka Keja · {activeSubscriptionPlan ?? 'rental'} plan active
+                </Text>
+                <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                  Unlocked: exact rental addresses, landlord contact, viewing requests
+                </Text>
+              </View>
             ) : null}
-            <MakeLabel darkMode={themeMode === 'dark'}>Active</MakeLabel>
+            {openRequests.length > 0 ? (
+              <>
+                <MakeLabel darkMode={themeMode === 'dark'}>Listing requests</MakeLabel>
+                <View style={styles.makeTripsActiveList}>
+                  {openRequests.map((req) => {
+                    const step = req.stepIndex ?? listingRequestStepIndex(req.status);
+                    const statusLabel =
+                      req.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[req.status] ?? req.status;
+                    return (
+                      <Pressable
+                        key={`req-${req.id}`}
+                        onPress={() => void openListingRequestDetail(req.id)}
+                        style={({ pressed }) => [
+                          styles.makeTripCard,
+                          { backgroundColor: theme.sheet, opacity: pressed ? 0.92 : 1 },
+                        ]}
+                      >
+                        <View style={styles.makeTripCardHead}>
+                          <View style={[styles.makeTripDotWrap, { backgroundColor: '#A78BFA33' }]}>
+                            <View style={[styles.makeTripDot, { backgroundColor: '#A78BFA' }]} />
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
+                              {req.kind === 'tour'
+                                ? `BnB tour · ${req.listingTitle}`
+                                : req.kind === 'viewing'
+                                  ? `House viewing · ${req.listingTitle}`
+                                  : `Stay · ${req.listingTitle}`}
+                            </Text>
+                            <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                              {req.service === 'bnb' ? 'BnB' : 'Rental'} · {statusLabel}
+                              {req.kind === 'viewing' && req.pickupModeLabel ? ` · ${req.pickupModeLabel}` : ''}
+                            </Text>
+                            <Text style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>
+                              Tap for messages & updates →
+                            </Text>
+                          </View>
+                        </View>
+                        <MakeDivider darkMode={themeMode === 'dark'} />
+                        <MakeStatusStepper
+                          steps={listingRequestStepLabels}
+                          current={Math.max(0, step)}
+                          darkMode={themeMode === 'dark'}
+                        />
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              </>
+            ) : null}
+            <MakeLabel darkMode={themeMode === 'dark'}>Orders & trips</MakeLabel>
             <View style={styles.makeTripsActiveList}>
-              {activeItems.length === 0 ? (
+                  {activeItems.length === 0 ? (
                 <View style={[styles.makeTripCard, { backgroundColor: theme.sheet }]}>
                   <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                    No active orders — book Fua or request a listing tour from Home.
+                    {openRequests.length > 0
+                      ? 'No active laundry or stay orders right now.'
+                      : 'No active orders — book Fua or request a listing tour from Home.'}
                   </Text>
                 </View>
               ) : (
                 activeItems.map((trip) => (
-                  <View key={`${trip.type}-${trip.id}`} style={[styles.makeTripCard, { backgroundColor: theme.sheet }]}>
+                  <Pressable
+                    key={`${trip.type}-${trip.id}`}
+                    onPress={
+                      trip.type === 'stay'
+                        ? () => void openBookedStayDetail(trip.id)
+                        : undefined
+                    }
+                    style={({ pressed }) => [
+                      styles.makeTripCard,
+                      { backgroundColor: theme.sheet, opacity: trip.type === 'stay' && pressed ? 0.92 : 1 },
+                    ]}
+                  >
                     <View style={styles.makeTripCardHead}>
                       <View
                         style={[
@@ -5239,6 +6015,11 @@ export default function App() {
                             {trip.amount} · Pay: {trip.payment}
                           </Text>
                         ) : null}
+                        {trip.type === 'stay' ? (
+                          <Text style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>
+                            Tap for address, coords & navigation →
+                          </Text>
+                        ) : null}
                       </View>
                     </View>
                     {trip.steps.length > 0 ? (
@@ -5247,7 +6028,7 @@ export default function App() {
                         <MakeStatusStepper steps={trip.steps} current={trip.step} darkMode={themeMode === 'dark'} />
                       </>
                     ) : null}
-                  </View>
+                  </Pressable>
                 ))
               )}
             </View>
@@ -5288,14 +6069,24 @@ export default function App() {
                 </Text>
               ) : (
                 historyItems.map((h, i) => (
-                  <View
+                  <Pressable
                     key={h.id}
-                    style={[
+                    onPress={
+                      'kind' in h && h.kind === 'stay'
+                        ? () => void openBookedStayDetail(h.id)
+                        : 'kind' in h && h.kind === 'listing_request'
+                          ? () => void openListingRequestDetail(h.id)
+                          : undefined
+                    }
+                    style={({ pressed }) => [
                       styles.makeHistoryRow,
                       i < historyItems.length - 1 && {
                         borderBottomWidth: StyleSheet.hairlineWidth,
                         borderBottomColor: theme.border,
                       },
+                      'kind' in h && (h.kind === 'stay' || h.kind === 'listing_request') && pressed
+                        ? { opacity: 0.92 }
+                        : null,
                     ]}
                   >
                     <View style={[styles.makeHistoryIcon, { backgroundColor: theme.mutedSurface }]}>
@@ -5308,10 +6099,30 @@ export default function App() {
                       </Text>
                     </View>
                     <Text style={[styles.makeHistoryAmount, { color: theme.textSecondary }]}>{h.amount}</Text>
-                  </View>
+                  </Pressable>
                 ))
               )}
             </View>
+            {completedOrders.filter((o) => o.status === 'delivered').length > 0 ? (
+              <>
+                <MakeLabel darkMode={themeMode === 'dark'}>Rate your FUA</MakeLabel>
+                {completedOrders
+                  .filter((o) => o.status === 'delivered')
+                  .slice(0, 3)
+                  .map((order) => (
+                    <FuaFeedbackCard
+                      key={`fb-${order.id}`}
+                      order={order}
+                      theme={theme}
+                      onConfirmed={(updated) => {
+                        setLaundryOrders((prev) =>
+                          prev.map((o) => (o.id === updated.id ? { ...o, ...updated } : o)),
+                        );
+                      }}
+                    />
+                  ))}
+              </>
+            ) : null}
           </>
         );
       }
@@ -5329,8 +6140,9 @@ export default function App() {
           ? new Date(profile.signedUpAt).toLocaleDateString('en-KE', { month: 'short', year: 'numeric' })
           : '—';
         const laundryCount = profile?.stats?.laundryOrders ?? laundryOrders.length;
-        const membershipLabel =
-          subscriptionPlans.length > 0
+        const membershipLabel = rentalSubscriptionActive
+          ? `Active · ${activeSubscriptionPlan ?? 'rental'} plan`
+          : subscriptionPlans.length > 0
             ? `${subscriptionPlans[0].label} from KES ${subscriptionPlans[0].priceKes}`
             : 'Browse plans in Saka Keja';
         const profileSections = [
@@ -5344,7 +6156,7 @@ export default function App() {
           {
             title: 'Preferences',
             items: [
-              { icon: '🔔', label: 'Notifications', detail: null as string | null, toggle: true, value: true },
+              { icon: '🔔', label: 'Notifications', detail: 'Ops messages via Activity · push soon', toggle: true, value: true },
             ],
           },
           {
@@ -5354,17 +6166,32 @@ export default function App() {
         ];
         return (
           <>
-            <View style={styles.makeProfileHead}>
+            <Pressable onPress={() => profile && setProfileEditOpen(true)} style={styles.makeProfileHead}>
               <View style={[styles.makeProfileAvatar, { backgroundColor: theme.primary }]}>
                 <Text style={styles.makeProfileAvatarText}>{initials || 'JX'}</Text>
               </View>
-              <View>
+              <View style={{ flex: 1 }}>
                 <Text style={[styles.makeProfileName, { color: theme.textPrimary }]}>{displayName}</Text>
                 <Text style={[styles.makeProfilePhone, { color: theme.textSecondary }]}>
                   {email || phone}
                 </Text>
+                {profile?.bio ? (
+                  <Text style={[styles.makeTripSub, { color: theme.textMuted, marginTop: 4 }]} numberOfLines={2}>
+                    {profile.bio}
+                  </Text>
+                ) : null}
+                <Text style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>Tap to edit profile</Text>
               </View>
-            </View>
+            </Pressable>
+            {profile ? (
+              <ProfileEditor
+                visible={profileEditOpen}
+                profile={profile}
+                onClose={() => setProfileEditOpen(false)}
+                onSaved={() => void refreshProfile()}
+                theme={theme}
+              />
+            ) : null}
             <Pressable
               onPress={() => void signOut()}
               style={[styles.makeProfileCard, { backgroundColor: theme.sheet, borderColor: theme.border, marginBottom: 16 }]}
@@ -5477,7 +6304,7 @@ export default function App() {
 
       const activeHubTripCount =
         laundryOrders.filter((o) => !['delivered', 'cancelled'].includes(o.status)).length +
-        listingRequests.filter((r) => r.status === 'new' || r.status === 'reviewed').length;
+        listingRequests.filter((r) => isActiveListingRequest(r.status)).length;
 
       if (activeSegment === 'home') {
         return (
@@ -5486,23 +6313,26 @@ export default function App() {
             carouselHint="Swipe for more · switch services with the bar above"
             cardWidth={heroCardWidth}
             locationLabel={locationLoading ? 'Locating…' : currentLocationLabel}
-            county={currentCounty}
+            county={countyDisplayLabel}
             darkMode={themeMode === 'dark'}
             activeTripCount={activeHubTripCount}
-            listingsLoading={dataLoading}
+            listingsLoading={listingsInitialLoading}
             listingsLoaded={listingsLoaded}
-            listingsError={dataError}
-            onRetryListings={() => void refreshAppData()}
+            listingsError={listingsError ?? dataError}
+            onRetryListings={() => void refreshAllListingsCatalog()}
             theme={theme}
-            popularStays={hubListingPool.bnbs.slice(0, 5).map((b) => ({
-              id: b.id,
-              title: b.title,
-              meta: `${b.rating} · ${b.price}`,
-              image: b.image,
-            }))}
+            popularStays={hubListingPool.bnbs.slice(0, 5).map((b) => {
+              const dist = formatListingDistanceLabel(b.coords, listingDistanceRef);
+              return {
+                id: b.id,
+                title: b.title,
+                meta: dist ? `${dist} · ${b.price}` : `${b.rating} · ${b.price}`,
+                image: b.image,
+              };
+            })}
             popularListings={hubPopularListings}
             nearbyRadiusKm={staysRadiusKm}
-            hasLocation={!!currentCoords}
+            hasLocation={!!currentCoords || !!listingsCounty}
             locationLoading={locationLoading}
             onBrowseListings={() => {
               setActiveSegment('bnbs');
@@ -5516,8 +6346,8 @@ export default function App() {
               setActiveService(service);
               setHomeSheetStageAnimated('mid');
             }}
-            onComingSoonService={() => {
-              setActiveSegment('rides');
+            onComingSoonService={(service) => {
+              setActiveSegment(service === 'movers' ? 'movers' : 'rides');
               setHomeSheetStageAnimated('mid');
             }}
             onOpenStay={(id) => {
@@ -5544,7 +6374,7 @@ export default function App() {
               }
               setHomeSheetStageAnimated('mid');
             }}
-            onOpenTrips={() => setActiveTab('trips')}
+            onOpenTrips={() => setActiveTab('activity')}
           />
         );
       }
@@ -6221,82 +7051,127 @@ export default function App() {
                   );
                 })}
               </View>
-              <Text style={styles.valetSheetTag}>Kisumu pilot · {currentCounty}</Text>
               <Text style={styles.valetSheetLead}>
-                {dataLoading
-                  ? 'Loading listings from server…'
-                  : isRental
-                    ? stayCount
-                      ? `Vacant rentals within ${staysRadiusKm} km. Exact pins unlock with subscription.`
-                      : `No rentals in ${staysRadiusKm} km — widen radius or browse all.`
-                    : stayCount
-                      ? `Short stays near you — book to reveal the full address.`
-                      : `Nothing listed in ${currentCounty} yet.`}
+                {listingsError
+                  ? listingsError
+                  : listingsInitialLoading
+                    ? 'Loading listings from server…'
+                    : isRental
+                      ? stayCount
+                        ? `Vacant rentals within ${staysRadiusKm} km. Exact pins unlock with subscription.`
+                        : listingsCounty
+                          ? `No rentals in ${staysRadiusKm} km — widen radius or browse all.`
+                          : 'Turn on location or set your county in profile to see nearby rentals.'
+                      : stayCount
+                        ? `Short stays near you — book to reveal the full address.`
+                        : listingsCounty
+                          ? `Nothing listed in ${countyDisplayLabel} yet.`
+                          : 'Turn on location or set your county in profile to see stays near you.'}
               </Text>
               <Text style={[styles.juxSectionLabel, styles.valetSectionLabelCompact]}>
                 {isRental ? 'Vacant nearby' : 'Stays nearby'}
                 {!dataLoading && listingsLoaded ? ` · ${staysRadiusKm} km` : ''}
               </Text>
               <View style={styles.staysSectionActionsRow}>
-                <Pressable onPress={() => setStaysSheetViewMode('list')} hitSlop={6}>
-                  <Text
+                <View style={[styles.staysViewToggle, { backgroundColor: theme.mutedSurface, borderColor: theme.border }]}>
+                  <Pressable
                     style={[
-                      styles.staysViewLink,
-                      staysSheetViewMode === 'list' && styles.staysViewLinkOn,
+                      styles.staysViewModeBtn,
+                      staysSheetViewMode === 'list' && { backgroundColor: theme.primaryLight },
                     ]}
+                    onPress={() => setStaysSheetViewMode('list')}
+                    hitSlop={4}
                   >
-                    List
-                  </Text>
-                </Pressable>
-                <Text style={styles.staysViewDot}>·</Text>
-                <Pressable
-                  onPress={() => {
-                    setStaysSheetViewMode('map');
-                    if (!currentCoords) void fetchCurrentLocation();
-                  }}
-                  hitSlop={6}
-                >
-                  <Text
+                    <Ionicons
+                      name="list-outline"
+                      size={16}
+                      color={staysSheetViewMode === 'list' ? theme.primary : theme.textSecondary}
+                    />
+                    <Text
+                      style={[
+                        styles.staysViewModeLabel,
+                        { color: staysSheetViewMode === 'list' ? theme.primary : theme.textSecondary },
+                        staysSheetViewMode === 'list' && styles.staysViewLinkOn,
+                      ]}
+                    >
+                      List
+                    </Text>
+                  </Pressable>
+                  <Pressable
                     style={[
-                      styles.staysViewLink,
-                      staysSheetViewMode === 'map' && styles.staysViewLinkOn,
+                      styles.staysViewModeBtn,
+                      staysSheetViewMode === 'map' && { backgroundColor: theme.primaryLight },
                     ]}
+                    onPress={() => {
+                      setStaysSheetViewMode('map');
+                      if (!currentCoords) void fetchCurrentLocation();
+                    }}
+                    hitSlop={4}
                   >
-                    Map
-                  </Text>
-                </Pressable>
-                <View style={{ flex: 1 }} />
-                <Pressable
-                  onPress={() => {
-                    const opts = [...STAYS_RADIUS_OPTIONS];
-                    const i = opts.indexOf(staysRadiusKm);
-                    setStaysRadiusKm(opts[(i >= 0 ? i + 1 : 0) % opts.length]);
-                  }}
-                  hitSlop={8}
-                >
-                  <Text style={styles.juxSeeAll}>Radius</Text>
-                </Pressable>
+                    <Ionicons
+                      name="map-outline"
+                      size={16}
+                      color={staysSheetViewMode === 'map' ? theme.primary : theme.textSecondary}
+                    />
+                    <Text
+                      style={[
+                        styles.staysViewModeLabel,
+                        { color: staysSheetViewMode === 'map' ? theme.primary : theme.textSecondary },
+                        staysSheetViewMode === 'map' && styles.staysViewLinkOn,
+                      ]}
+                    >
+                      Map
+                    </Text>
+                  </Pressable>
+                </View>
+                <View style={{ flex: 1, minWidth: 8 }} />
+                {STAYS_RADIUS_OPTIONS.map((km) => {
+                  const on = staysRadiusKm === km;
+                  return (
+                    <Pressable
+                      key={km}
+                      style={[
+                        styles.staysRadiusChip,
+                        { borderColor: theme.border, backgroundColor: theme.canvas },
+                        on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
+                      ]}
+                      onPress={() => setStaysRadiusKm(km)}
+                      hitSlop={4}
+                    >
+                      <Text
+                        style={[
+                          styles.staysRadiusChipText,
+                          { color: on ? theme.primary : theme.textSecondary },
+                          on && styles.staysViewLinkOn,
+                        ]}
+                      >
+                        {km} km
+                      </Text>
+                    </Pressable>
+                  );
+                })}
                 <Pressable
                   onPress={() => {
                     setListingCatalog(isRental ? 'house' : 'bnb');
+                    setListingCounty('any');
                     setListingRadiusKm(staysRadiusKm);
                     setHomeDeepPage('listings');
                     setHomeSheetStageAnimated('full');
                   }}
                   hitSlop={8}
                 >
-                  <Text style={styles.juxSeeAll}>See all</Text>
+                  <Text style={[styles.juxSeeAll, { color: theme.primary }]}>Browse catalog</Text>
                 </Pressable>
               </View>
               {staysSheetViewMode === 'map' ? (
                 <>
                   <Text style={styles.homeDeepCount}>
-                    {dataLoading
+                    {listingsInitialLoading
                       ? 'Loading listings…'
                       : `${stayCount} on map within ${staysRadiusKm} km · tap a pin for details`}
                   </Text>
                   <View style={[styles.staysHomeMapBand, { height: staysMapHeight }]}>
-                    {dataLoading ? (
+                    {listingsInitialLoading ? (
                       <View style={[styles.serviceMapFallback, { justifyContent: 'center' }]}>
                         <ActivityIndicator size="small" color={theme.primary} />
                         <Text style={[styles.serviceMapFallbackText, { marginTop: 10 }]}>
@@ -6345,12 +7220,12 @@ export default function App() {
                     </View>
                   </View>
                 </>
-              ) : dataLoading ? (
+              ) : listingsInitialLoading ? (
                 <View style={styles.listingsLoadingRow}>
                   <ActivityIndicator size="small" color={theme.primary} />
                   <Text style={[styles.juxHintMuted, { marginLeft: 10 }]}>Loading listings from server…</Text>
                 </View>
-              ) : dataError ? (
+              ) : dataError && !listingsLoaded ? (
                 <View style={styles.listingsLoadingRow}>
                   <Text style={[styles.juxHintMuted, { flex: 1 }]}>{dataError}</Text>
                   <Pressable onPress={() => void refreshAppData()} hitSlop={8}>
@@ -6388,9 +7263,15 @@ export default function App() {
                               <Text style={styles.juxStayCardTitle} numberOfLines={2}>
                                 {house.title}
                               </Text>
-                              <Text style={styles.juxStayCardMeta}>
-                                {house.beds} bed · {house.baths} bath · {house.distanceKm} km
-                              </Text>
+                              <ListingMetaText
+                                coords={house.coords}
+                                price={`${house.beds} bed · ${house.baths} bath`}
+                                reference={listingDistanceRef}
+                                fallbackCounty={house.county}
+                                distanceColor={theme.primary}
+                                metaColor={theme.textSecondary}
+                                style={styles.juxStayCardMeta}
+                              />
                               <Text style={styles.juxStayCardPrice}>{house.price}</Text>
                             </View>
                           </Pressable>
@@ -6412,9 +7293,15 @@ export default function App() {
                               <Text style={styles.juxStayCardTitle} numberOfLines={2}>
                                 {bnb.title}
                               </Text>
-                              <Text style={styles.juxStayCardMeta}>
-                                {bnb.rating} ★ · {bnb.beds} bed · {bnb.guests} guests
-                              </Text>
+                              <ListingMetaText
+                                coords={bnb.coords}
+                                price={`${bnb.rating} ★ · ${bnb.beds} bed · ${bnb.guests} guests`}
+                                reference={listingDistanceRef}
+                                fallbackCounty={bnb.county}
+                                distanceColor={theme.primary}
+                                metaColor={theme.textSecondary}
+                                style={styles.juxStayCardMeta}
+                              />
                               <Text style={styles.juxStayCardPrice}>{bnb.price}</Text>
                             </View>
                           </Pressable>
@@ -6424,29 +7311,25 @@ export default function App() {
                 </CarouselZone>
               ) : (
                 <Text style={styles.juxHintMuted}>
-                  {isRental ? 'No rentals in range — widen radius.' : 'No stays in this area yet.'}
+                  {isRental ? 'No rentals in range — widen radius or browse all.' : 'No stays in this area yet — browse the catalog.'}
                 </Text>
               )}
-              {stayCount > 0 ? (
-                <Pressable
-                  style={styles.homeDeepEntryRow}
-                  onPress={() => {
-                    setListingCatalog(isRental ? 'house' : 'bnb');
-                    setListingCounty(stayCount > FEATURED_STAYS_HOME ? currentCounty : 'any');
-                    if (!isRental) setListingSpace('any');
-                    setListingQuery('');
-                    setListingRadiusKm(staysRadiusKm);
-                    setListingDetail(null);
-                    setHomeSheetStageAnimated('collapsed');
-                    setHomeDeepPage('listings');
-                  }}
-                >
-                  <Text style={styles.homeDeepEntryTitle}>
-                    {stayCount > FEATURED_STAYS_HOME ? 'View all listings' : 'Browse catalog'} ›
-                  </Text>
-                  <Text style={styles.homeDeepEntrySub}>Area · distance · search</Text>
-                </Pressable>
-              ) : null}
+              <Pressable
+                style={styles.homeDeepEntryRow}
+                onPress={() => {
+                  setListingCatalog(isRental ? 'house' : 'bnb');
+                  setListingCounty(stayCount > 0 && currentCounty ? currentCounty : 'any');
+                  setListingRadiusKm(staysRadiusKm);
+                  setListingDetail(null);
+                  setHomeSheetStageAnimated('full');
+                  setHomeDeepPage('listings');
+                }}
+              >
+                <Text style={[styles.homeDeepEntryTitle, { color: theme.primary }]}>
+                  {stayCount > 0 ? 'View all listings' : 'Browse catalog'} ›
+                </Text>
+                <Text style={styles.homeDeepEntrySub}>All areas · near me · list & map</Text>
+              </Pressable>
               {isRental && focusedHouse ? (
                 <View style={styles.juxListingDetail}>
                   <CarouselZone style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
@@ -6479,11 +7362,18 @@ export default function App() {
                   <View style={styles.juxListingDetailBody}>
                     <View style={styles.juxListingTitleRow}>
                       <Text style={styles.juxListingTitle}>{focusedHouse.title}</Text>
-                      <Text style={styles.juxListingRating}>{focusedHouse.distanceKm} km</Text>
+                      <ListingDistanceBadge
+                        coords={focusedHouse.coords}
+                        reference={listingDistanceRef}
+                        fallbackLabel={`${focusedHouse.county} area`}
+                        color={theme.primary}
+                        approxColor={theme.textSecondary}
+                        style={styles.juxListingRating}
+                      />
                     </View>
                     <Text style={styles.juxListingPrice}>{focusedHouse.price}</Text>
                     <Text style={styles.juxListingDesc} numberOfLines={compactDetail ? 2 : 6}>
-                      {rentalSubscribed
+                      {rentalSubscriptionActive
                         ? `${focusedHouse.county} · exact pin unlocked. Viewings by appointment.`
                         : `${focusedHouse.county} area only — subscribe to unlock exact location and contact landlord.`}
                     </Text>
@@ -6507,7 +7397,7 @@ export default function App() {
                       </CarouselZone>
                     ) : null}
                     <View style={styles.valetListingFooterCompact}>
-                      {rentalSubscribed ? (
+                      {rentalSubscriptionActive ? (
                         <Pressable
                           onPress={() => {
                             if (!MAPBOX_ACCESS_TOKEN) {
@@ -6518,10 +7408,15 @@ export default function App() {
                               setBookingMessage('We need your current location — tap the location pill, then try again.');
                               return;
                             }
-                            setGuidedJourney({
+                            beginGuidedJourney({
                               end: focusedHouse.coords,
                               title: focusedHouse.title,
-                              subtitle: `${focusedHouse.distanceKm} km · ${focusedHouse.price}`,
+                              subtitle: formatListingMetaLine(
+                              focusedHouse.coords,
+                              focusedHouse.price,
+                              listingDistanceRef,
+                              focusedHouse.county,
+                            ),
                               kind: 'house',
                             });
                           }}
@@ -6582,7 +7477,14 @@ export default function App() {
                   <View style={styles.juxListingDetailBody}>
                     <View style={styles.juxListingTitleRow}>
                       <Text style={styles.juxListingTitle}>{focusedBnb.title}</Text>
-                      <Text style={styles.juxListingRating}>{focusedBnb.rating} ★</Text>
+                      <ListingDistanceBadge
+                        coords={focusedBnb.coords}
+                        reference={listingDistanceRef}
+                        fallbackLabel={`${focusedBnb.rating} ★`}
+                        color={theme.primary}
+                        approxColor={theme.textSecondary}
+                        style={styles.juxListingRating}
+                      />
                     </View>
                     <Text style={styles.juxListingPrice}>{focusedBnb.price}</Text>
                     <Text style={styles.juxListingDesc} numberOfLines={compactDetail ? 2 : 5}>
@@ -6618,7 +7520,7 @@ export default function App() {
                             setBookingMessage('We need your current location — tap the location pill, then try again.');
                             return;
                           }
-                          setGuidedJourney({
+                          beginGuidedJourney({
                             end: focusedBnb.coords,
                             title: focusedBnb.title,
                             subtitle: `${focusedBnb.county} · ${focusedBnb.rating} ★ · ${focusedBnb.price}`,
@@ -6723,8 +7625,8 @@ export default function App() {
             setTripFeed((prev) => [request, ...prev].slice(0, 10));
             const shortMsg =
               order.serviceType === 'mamafua'
-                ? 'Mama Fua visit submitted — check Trips'
-                : 'Fua request submitted — check Trips';
+                ? 'Mama Fua visit submitted — check Activity'
+                : 'Fua request submitted — check Activity';
             flashBookingNotice(shortMsg, { goTrips: true });
             setLaundryWizardStep('pickup');
             setPhaseForService('laundry', 'selecting');
@@ -6874,7 +7776,7 @@ export default function App() {
                 if (ridePlannerStop.trim()) bits.push(`via ${ridePlannerStop.trim()}`);
                 const tripSummary = bits.join(' · ');
                 setTripFeed((previous) => [tripSummary, ...previous].slice(0, 10));
-                flashBookingNotice('Ride confirmed — check Trips', { goTrips: true });
+                flashBookingNotice('Ride confirmed — check Activity', { goTrips: true });
                 setPhaseForService('rides', 'idle');
                 setRideWizardStep('pickup');
                 setHomeSheetStageAnimated('mid');
@@ -6891,14 +7793,14 @@ export default function App() {
             return (
               <SheetStickyFooter
                 label="Select a rental"
-                sublabel={`Within ${staysRadiusKm} km · ${currentCounty}`}
+                sublabel={`Within ${staysRadiusKm} km · ${countyDisplayLabel}`}
                 disabled
                 darkMode={themeMode === 'dark'}
                 onPress={() => {}}
               />
             );
           }
-          if (!rentalSubscribed) {
+          if (!rentalSubscriptionActive) {
             return (
               <SheetStickyFooter
                 label={requestSubmitting ? 'Submitting…' : 'Subscribe to unlock'}
@@ -6910,7 +7812,7 @@ export default function App() {
                 }
                 disabled={requestSubmitting}
                 darkMode={themeMode === 'dark'}
-                onPress={() => void subscribeToKeja()}
+                onPress={() => setSubscriptionSheetOpen(true)}
               />
             );
           }
@@ -6922,7 +7824,9 @@ export default function App() {
               disabled={requestSubmitting}
               darkMode={themeMode === 'dark'}
               onPress={() =>
-                void submitListingRequest('viewing', focusedHouse.id, focusedHouse.title, 'house')
+                openViewingRequestSheet(focusedHouse.id, focusedHouse.title, 'house', {
+                  priceLabel: focusedHouse.price,
+                })
               }
             />
           );
@@ -6931,10 +7835,22 @@ export default function App() {
           return (
             <SheetStickyFooter
               label="Select a stay"
-              sublabel={`Book-to-reveal address · ${currentCounty}`}
+              sublabel={`Book-to-reveal address · ${countyDisplayLabel}`}
               disabled
               darkMode={themeMode === 'dark'}
               onPress={() => {}}
+            />
+          );
+        }
+        const focusedBnbBooking = findActiveBnbBookingForListing(bnbBookings, focusedBnb.id);
+        if (focusedBnbBooking) {
+          return (
+            <SheetStickyFooter
+              label="Reserved"
+              tone="outline"
+              sublabel={`${focusedBnb.title} · ${focusedBnbBooking.checkIn} → ${focusedBnbBooking.checkOut}`}
+              darkMode={themeMode === 'dark'}
+              onPress={() => void openBookedStayDetail(focusedBnbBooking.id)}
             />
           );
         }
@@ -6945,7 +7861,7 @@ export default function App() {
             sublabel={`${focusedBnb.title} · ${focusedBnb.price}`}
             disabled={requestSubmitting}
             darkMode={themeMode === 'dark'}
-            onPress={() => void submitListingRequest('stay', focusedBnb.id, focusedBnb.title, 'bnb')}
+            onPress={() => openBnbBooking(focusedBnb.id, focusedBnb.title, focusedBnb.price)}
           />
         );
       }
@@ -6957,6 +7873,19 @@ export default function App() {
       if (homeDeepPage === 'listing-detail' && listingDetailEntity) {
         if (listingDetail?.kind === 'bnb') {
           const b = listingDetailEntity as BnbListing;
+          const detailBooking = findActiveBnbBookingForListing(bnbBookings, b.id);
+          if (detailBooking) {
+            return (
+              <SheetStickyFooter
+                label="Reserved"
+                tone="outline"
+                sublabel={`${b.title} · ${detailBooking.checkIn} → ${detailBooking.checkOut}`}
+                darkMode={themeMode === 'dark'}
+                style={{ paddingBottom: insets.bottom + 8 }}
+                onPress={() => void openBookedStayDetail(detailBooking.id)}
+              />
+            );
+          }
           return (
             <SheetStickyFooter
               label={requestSubmitting ? 'Submitting…' : 'Reserve stay'}
@@ -6964,14 +7893,12 @@ export default function App() {
               disabled={requestSubmitting}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
-              onPress={() =>
-                void submitListingRequest('stay', b.id, b.title, 'bnb', { closeDeepPage: true })
-              }
+              onPress={() => openBnbBooking(b.id, b.title, b.price)}
             />
           );
         }
         const h = listingDetailEntity as HouseListing;
-        if (!rentalSubscribed) {
+        if (!rentalSubscriptionActive) {
           return (
             <SheetStickyFooter
               label={requestSubmitting ? 'Submitting…' : 'Subscribe to unlock'}
@@ -6983,7 +7910,7 @@ export default function App() {
               disabled={requestSubmitting}
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
-              onPress={() => void subscribeToKeja()}
+              onPress={() => setSubscriptionSheetOpen(true)}
             />
           );
         }
@@ -6995,7 +7922,10 @@ export default function App() {
             darkMode={themeMode === 'dark'}
             style={{ paddingBottom: insets.bottom + 8 }}
             onPress={() =>
-              void submitListingRequest('viewing', h.id, h.title, 'house', { closeDeepPage: true })
+              openViewingRequestSheet(h.id, h.title, 'house', {
+                closeDeepPage: true,
+                priceLabel: h.price,
+              })
             }
           />
         );
@@ -7008,10 +7938,15 @@ export default function App() {
         if (mapListing) {
           const title = mapListing.title;
           const price = mapListing.price;
+          const distLabel = formatListingDistanceLabel(mapListing.coords, listingDistanceRef);
           return (
             <SheetStickyFooter
               label="View listing details"
-              sublabel={`${title} · ${price}`}
+              sublabel={
+                distLabel
+                  ? `${distLabel}${listingDistanceRef.isApproximate ? ' approx' : ''} · ${title} · ${price}`
+                  : `${title} · ${price}`
+              }
               darkMode={themeMode === 'dark'}
               style={{ paddingBottom: insets.bottom + 8 }}
               onPress={() => {
@@ -7356,7 +8291,7 @@ export default function App() {
             <Pressable
               style={styles.juxNoticePill}
               onPress={() => {
-                if (/check Trips/i.test(bookingMessage)) setActiveTab('trips');
+                if (/check Activity/i.test(bookingMessage)) setActiveTab('activity');
                 setBookingMessage('');
               }}
             >
@@ -7491,30 +8426,27 @@ export default function App() {
                 {homeDeepPage === 'service-map' ? (
                   <Text style={styles.homeDeepMapTitle}>{serviceMapTitle}</Text>
                 ) : homeDeepPage === 'listings' ? (
-                  <View style={styles.listingsHeaderRow}>
-                    <Text style={styles.homeDeepMapTitle}>Listings</Text>
-                    <View style={styles.staysSectionActionsRow}>
-                      <Pressable onPress={() => setListingsViewMode('list')} hitSlop={6}>
-                        <Text style={[styles.staysViewLink, listingsViewMode === 'list' && styles.staysViewLinkOn]}>
-                          List
-                        </Text>
-                      </Pressable>
-                      <Text style={styles.staysViewDot}>·</Text>
-                      <Pressable
-                        onPress={() => {
-                          setListingsViewMode('map');
-                          if (!currentCoords) void fetchCurrentLocation();
-                        }}
-                        hitSlop={6}
-                      >
-                        <Text style={[styles.staysViewLink, listingsViewMode === 'map' && styles.staysViewLinkOn]}>
-                          Map
-                        </Text>
-                      </Pressable>
-                    </View>
-                  </View>
+                  <Text style={styles.homeDeepMapTitle}>Listings</Text>
                 ) : null}
               </View>
+              {homeDeepPage === 'listings' ? (
+                <ListingsExplorePanel
+                  theme={theme}
+                  listingsViewMode={listingsViewMode}
+                  onViewModeChange={setListingsViewMode}
+                  listingCounty={listingCounty}
+                  onListingCountyChange={handleListingCountyChange}
+                  listingAreaChips={listingAreaChips}
+                  listingRadiusKm={listingRadiusKm}
+                  onListingRadiusChange={(km) =>
+                    setListingRadiusKm(km as (typeof STAYS_RADIUS_OPTIONS)[number])
+                  }
+                  radiusOptions={LISTING_RADIUS_OPTIONS}
+                  showRadiusChips={listingCounty === 'near_me'}
+                  locationReady={!!currentCoords}
+                  onRequestLocation={() => void fetchCurrentLocation()}
+                />
+              ) : null}
               {homeDeepPage === 'service-map' ? (
                 <View style={styles.serviceMapBody}>
                   {serviceMapHtml ? (
@@ -7629,12 +8561,16 @@ export default function App() {
                       </Pressable>
                     </View>
                     <Text style={styles.homeDeepCount}>
-                      {dataLoading
+                      {listingsPageLoading
                         ? 'Loading listings…'
-                        : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin for details`}
+                        : listingCounty === 'near_me' && currentCoords
+                          ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} within ${listingRadiusKm} km · tap a pin`
+                          : listingCounty === 'any'
+                            ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} across all areas · tap a pin`
+                            : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin for details`}
                     </Text>
                     <View style={styles.listingsMapBody}>
-                      {dataLoading ? (
+                      {listingsPageLoading ? (
                         <View style={[styles.serviceMapFallback, { justifyContent: 'center' }]}>
                           <ActivityIndicator size="small" color={theme.primary} />
                           <Text style={[styles.serviceMapFallbackText, { marginTop: 10 }]}>
@@ -7643,6 +8579,7 @@ export default function App() {
                         </View>
                       ) : listingsMapHtml ? (
                         <WebView
+                          key={listingsMapPinKey}
                           ref={listingsMapWebViewRef}
                           source={{ html: listingsMapHtml }}
                           style={StyleSheet.absoluteFillObject}
@@ -7735,67 +8672,46 @@ export default function App() {
                       </Text>
                     </Pressable>
                   </View>
-                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.homeDeepChipRow}>
-                    {(['near_me', 'any', 'kisumu'] as const).map((key) => {
-                      const on = listingCounty === key;
-                      const label =
-                        key === 'near_me' ? 'Near me' : key === 'any' ? 'All areas' : 'Kisumu';
-                      return (
-                        <Pressable
-                          key={key}
-                          style={[styles.homeDeepChip, on && styles.homeDeepChipOn]}
-                          onPress={() => setListingCounty(key)}
-                        >
-                          <Text style={[styles.homeDeepChipText, on && styles.homeDeepChipTextOn]}>{label}</Text>
-                        </Pressable>
-                      );
-                    })}
-                    {listingCounty === 'near_me' && currentCoords ? (
-                      <Pressable
-                        style={[styles.homeDeepChip, styles.homeDeepChipOn]}
-                        onPress={() => {
-                          const opts = [...STAYS_RADIUS_OPTIONS];
-                          const i = opts.indexOf(listingRadiusKm);
-                          setListingRadiusKm(opts[(i >= 0 ? i + 1 : 0) % opts.length]);
-                        }}
-                      >
-                        <Text style={[styles.homeDeepChipText, styles.homeDeepChipTextOn]}>
-                          {listingRadiusKm} km
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                  </ScrollView>
-                  <TextInput
-                    value={listingQuery}
-                    onChangeText={setListingQuery}
-                    placeholder="Search by title"
-                    placeholderTextColor={theme.textMuted}
-                    style={styles.homeDeepSearch}
-                  />
                   <Text style={styles.homeDeepCount}>
-                    {dataLoading
+                    {listingsPageLoading
                       ? 'Loading…'
-                      : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} results`}
+                      : listingCounty === 'near_me'
+                        ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} within ${listingRadiusKm} km${currentCoords ? '' : ' (approx)'}`
+                        : listingCounty === 'any'
+                          ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} across all areas`
+                          : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} results`}
                   </Text>
-                  {dataLoading ? (
+                  {listingsPageLoading ? (
                     <View style={styles.listingsLoadingRow}>
                       <ActivityIndicator size="small" color={theme.primary} />
                       <Text style={[styles.juxHintMuted, { marginLeft: 10 }]}>Loading listings from server…</Text>
                     </View>
+                  ) : listingsError ? (
+                    <View style={styles.listingsLoadingRow}>
+                      <Text style={[styles.juxHintMuted, { flex: 1 }]}>{listingsError}</Text>
+                      <Pressable onPress={() => void refreshListingsForArea()} hitSlop={8}>
+                        <Text style={{ color: theme.primary, fontWeight: '600' }}>Retry</Text>
+                      </Pressable>
+                    </View>
                   ) : dataError ? (
                     <View style={styles.listingsLoadingRow}>
                       <Text style={[styles.juxHintMuted, { flex: 1 }]}>{dataError}</Text>
-                      <Pressable onPress={() => void refreshAppData()} hitSlop={8}>
+                      <Pressable onPress={() => void refreshListingsForArea()} hitSlop={8}>
                         <Text style={{ color: theme.primary, fontWeight: '600' }}>Retry</Text>
                       </Pressable>
                     </View>
                   ) : (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length === 0 ? (
                     <Text style={styles.juxHintMuted}>
-                      No matches — try All areas or a county, or Near me with location and a wider distance cap
-                      {listingCatalog === 'bnb' ? ', stay type' : ''}, or search.
+                      {listingCounty === 'near_me' && !currentCoords && !listingsCounty
+                        ? 'Turn on location or set your county in profile to filter Near me.'
+                        : listingCounty === 'near_me' && !currentCoords
+                          ? `Showing listings in ${countyDisplayLabel} while location loads — enable GPS for precise Near me.`
+                          : listingCounty === 'near_me' && currentCoords
+                            ? `No listings within ${listingRadiusKm} km — try widening the radius or switch to All areas.`
+                            : 'No matches — try All areas or your county chip above.'}
                     </Text>
                   ) : null}
-                  {!dataLoading && listingsLoaded
+                  {!listingsInitialLoading && !listingsError
                     ? (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).map((row, ri, arr) => (
                     <Pressable
                       key={listingCatalog === 'bnb' ? (row as BnbListing).id : (row as HouseListing).id}
@@ -7830,11 +8746,22 @@ export default function App() {
                         <Text style={styles.listingCatTitle} numberOfLines={2}>
                           {listingCatalog === 'bnb' ? (row as BnbListing).title : (row as HouseListing).title}
                         </Text>
-                        <Text style={styles.listingCatMeta} numberOfLines={1}>
-                          {listingCatalog === 'bnb'
-                            ? `${(row as BnbListing).county} · ${(row as BnbListing).price}`
-                            : `${(row as HouseListing).distanceKm} km · ${(row as HouseListing).price}`}
-                        </Text>
+                        <ListingMetaText
+                          coords={row.coords}
+                          price={
+                            listingCatalog === 'bnb'
+                              ? (row as BnbListing).price
+                              : (row as HouseListing).price
+                          }
+                          reference={listingDistanceRef}
+                          fallbackCounty={
+                            listingCatalog === 'bnb'
+                              ? (row as BnbListing).county
+                              : (row as HouseListing).county
+                          }
+                          distanceColor={theme.primary}
+                          metaColor={theme.textMuted}
+                        />
                       </View>
                       <Text style={styles.listingCatChev}>›</Text>
                     </Pressable>
@@ -7853,10 +8780,34 @@ export default function App() {
                   {listingDetail.kind === 'bnb' ? (
                     <>
                       <Text style={styles.homeDeepPageTitle}>{(listingDetailEntity as BnbListing).title}</Text>
-                      <Text style={styles.homeDeepPageLead}>
-                        {(listingDetailEntity as BnbListing).county} · {(listingDetailEntity as BnbListing).rating} ★ ·{' '}
-                        {(listingDetailEntity as BnbListing).price}
-                      </Text>
+                      <ListingMetaText
+                        coords={(listingDetailEntity as BnbListing).coords}
+                        price={`${(listingDetailEntity as BnbListing).rating} ★ · ${(listingDetailEntity as BnbListing).price}`}
+                        reference={listingDistanceRef}
+                        fallbackCounty={(listingDetailEntity as BnbListing).county}
+                        distanceColor={theme.primary}
+                        metaColor={theme.textSecondary}
+                        style={styles.homeDeepPageLead}
+                      />
+                      {(() => {
+                        const stayBooking = findActiveBnbBookingForListing(
+                          bnbBookings,
+                          (listingDetailEntity as BnbListing).id,
+                        );
+                        if (!stayBooking) return null;
+                        return (
+                          <View
+                            style={[
+                              styles.listingReservedBadge,
+                              { borderColor: theme.primary, backgroundColor: theme.mutedSurface },
+                            ]}
+                          >
+                            <Text style={[styles.listingReservedBadgeText, { color: theme.primary }]}>
+                              Reserved · {stayBooking.checkIn} → {stayBooking.checkOut}
+                            </Text>
+                          </View>
+                        );
+                      })()}
                       <View style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
                         <FlatList
                           style={{ width: listingCarouselW }}
@@ -7882,6 +8833,45 @@ export default function App() {
                       </View>
                       <View style={styles.juxListingDetailBody}>
                         <Text style={styles.juxListingDesc}>{(listingDetailEntity as BnbListing).exploreReason}</Text>
+                        {!(listingDetailEntity as BnbListing).locationLocked &&
+                        (listingDetailEntity as BnbListing).exactAddress ? (
+                          <View style={[styles.listingUnlockCard, { backgroundColor: theme.mutedSurface, borderColor: theme.border }]}>
+                            <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>Exact address</Text>
+                            <Text style={[styles.juxListingDesc, { color: theme.textSecondary, marginTop: 0 }]}>
+                              {(listingDetailEntity as BnbListing).exactAddress}
+                            </Text>
+                            {(listingDetailEntity as BnbListing).hostPhone ? (
+                              <Text style={[styles.juxListingTip, { color: theme.primary, marginTop: 2 }]}>
+                                Host: {(listingDetailEntity as BnbListing).hostName ?? 'Contact'} ·{' '}
+                                {(listingDetailEntity as BnbListing).hostPhone}
+                              </Text>
+                            ) : null}
+                          </View>
+                        ) : (
+                          <Text style={[styles.juxListingTip, { color: theme.textMuted }]}>
+                            Reserve & pay to reveal exact address, host contact, and coordinates.
+                          </Text>
+                        )}
+                        {!(listingDetailEntity as BnbListing).locationLocked ? (
+                          <ListingLocationActions
+                            title={(listingDetailEntity as BnbListing).title}
+                            coords={
+                              (listingDetailEntity as BnbListing).exactCoords ??
+                              (listingDetailEntity as BnbListing).coords
+                            }
+                            unlocked
+                            theme={theme}
+                            onNavigate={() => startGuidedToListing(listingDetailEntity as BnbListing, 'bnb')}
+                            onRequestRide={() =>
+                              void requestRideToListing(
+                                (listingDetailEntity as BnbListing).id,
+                                (listingDetailEntity as BnbListing).title,
+                                'bnb',
+                              )
+                            }
+                            navigateDisabled={!MAPBOX_ACCESS_TOKEN || !currentCoords}
+                          />
+                        ) : null}
                         {(listingDetailEntity as BnbListing).detailHighlights.map((line) => (
                           <View key={line} style={styles.juxListingBulletRow}>
                             <Text style={styles.juxListingBulletGlyph}>●</Text>
@@ -7905,28 +8895,6 @@ export default function App() {
                         <View style={styles.valetListingFooterCompact}>
                           <Pressable
                             onPress={() => {
-                              if (!MAPBOX_ACCESS_TOKEN) {
-                                setBookingMessage('Add a Mapbox token (EXPO_PUBLIC_MAPBOX_TOKEN) for navigation.');
-                                return;
-                              }
-                              if (!currentCoords) {
-                                setBookingMessage('We need your current location — tap the location pill, then try again.');
-                                return;
-                              }
-                              const b = listingDetailEntity as BnbListing;
-                              setGuidedJourney({
-                                end: b.coords,
-                                title: b.title,
-                                subtitle: `${b.county} · ${b.rating} ★ · ${b.price}`,
-                                kind: 'bnb',
-                              });
-                            }}
-                            style={styles.textRowActionHit}
-                          >
-                            <Text style={styles.textRowAction}>Live route</Text>
-                          </Pressable>
-                          <Pressable
-                            onPress={() => {
                               const b = listingDetailEntity as BnbListing;
                               void submitListingRequest('tour', b.id, b.title, 'bnb');
                             }}
@@ -7940,10 +8908,15 @@ export default function App() {
                   ) : (
                     <>
                       <Text style={styles.homeDeepPageTitle}>{(listingDetailEntity as HouseListing).title}</Text>
-                      <Text style={styles.homeDeepPageLead}>
-                        {(listingDetailEntity as HouseListing).county} · {(listingDetailEntity as HouseListing).distanceKm}{' '}
-                        km · {(listingDetailEntity as HouseListing).price}
-                      </Text>
+                      <ListingMetaText
+                        coords={(listingDetailEntity as HouseListing).coords}
+                        price={(listingDetailEntity as HouseListing).price}
+                        reference={listingDistanceRef}
+                        fallbackCounty={(listingDetailEntity as HouseListing).county}
+                        distanceColor={theme.primary}
+                        metaColor={theme.textSecondary}
+                        style={styles.homeDeepPageLead}
+                      />
                       <View style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
                         <FlatList
                           style={{ width: listingCarouselW }}
@@ -7971,6 +8944,45 @@ export default function App() {
                         <Text style={styles.juxListingDesc}>
                           Longer stays and in-person viewings by appointment. Below: highlights and what is on site.
                         </Text>
+                        {!(listingDetailEntity as HouseListing).locationLocked &&
+                        (listingDetailEntity as HouseListing).exactAddress ? (
+                          <View style={[styles.listingUnlockCard, { backgroundColor: theme.mutedSurface, borderColor: theme.border }]}>
+                            <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>Exact location</Text>
+                            <Text style={[styles.juxListingDesc, { color: theme.textSecondary, marginTop: 0 }]}>
+                              {(listingDetailEntity as HouseListing).exactAddress}
+                            </Text>
+                            {(listingDetailEntity as HouseListing).hostPhone ? (
+                              <Text style={[styles.juxListingTip, { color: theme.primary, marginTop: 2 }]}>
+                                Landlord: {(listingDetailEntity as HouseListing).hostName ?? 'Contact'} ·{' '}
+                                {(listingDetailEntity as HouseListing).hostPhone}
+                              </Text>
+                            ) : null}
+                          </View>
+                        ) : (
+                          <Text style={[styles.juxListingTip, { color: theme.textMuted }]}>
+                            Subscribe to unlock exact address, landlord contact, and coordinates.
+                          </Text>
+                        )}
+                        {!(listingDetailEntity as HouseListing).locationLocked ? (
+                          <ListingLocationActions
+                            title={(listingDetailEntity as HouseListing).title}
+                            coords={
+                              (listingDetailEntity as HouseListing).exactCoords ??
+                              (listingDetailEntity as HouseListing).coords
+                            }
+                            unlocked
+                            theme={theme}
+                            onNavigate={() => startGuidedToListing(listingDetailEntity as HouseListing, 'house')}
+                            onRequestRide={() =>
+                              void requestRideToListing(
+                                (listingDetailEntity as HouseListing).id,
+                                (listingDetailEntity as HouseListing).title,
+                                'house',
+                              )
+                            }
+                            navigateDisabled={!MAPBOX_ACCESS_TOKEN || !currentCoords}
+                          />
+                        ) : null}
                         {(listingDetailEntity as HouseListing).detailHighlights.map((line) => (
                           <View key={line} style={styles.juxListingBulletRow}>
                             <Text style={styles.juxListingBulletGlyph}>●</Text>
@@ -7989,39 +9001,22 @@ export default function App() {
                           ))}
                         </ScrollView>
                         <View style={styles.valetListingFooterCompact}>
-                          {rentalSubscribed ? (
+                          {!(listingDetailEntity as HouseListing).locationLocked ? (
                             <Pressable
                               onPress={() => {
-                                if (!MAPBOX_ACCESS_TOKEN) {
-                                  setBookingMessage('Add a Mapbox token (EXPO_PUBLIC_MAPBOX_TOKEN) for navigation.');
-                                  return;
-                                }
-                                if (!currentCoords) {
-                                  setBookingMessage('We need your current location — tap the location pill, then try again.');
-                                  return;
-                                }
-                                const h = listingDetailEntity as HouseListing;
-                                setGuidedJourney({
-                                  end: h.coords,
-                                  title: h.title,
-                                  subtitle: `${h.distanceKm} km · ${h.price}`,
-                                  kind: 'house',
-                                });
+                                if (!listingDetailEntity || listingDetail.kind !== 'house') return;
+                                openViewingRequestSheet(
+                                  listingDetailEntity.id,
+                                  listingDetailEntity.title,
+                                  'house',
+                                  { priceLabel: (listingDetailEntity as HouseListing).price },
+                                );
                               }}
                               style={styles.textRowActionHit}
                             >
-                              <Text style={styles.textRowAction}>Live route</Text>
+                              <Text style={styles.textRowActionMuted}>Request viewing</Text>
                             </Pressable>
                           ) : null}
-                          <Pressable
-                            onPress={() => {
-                              const h = listingDetailEntity as HouseListing;
-                              void submitListingRequest('tour', h.id, h.title, 'house');
-                            }}
-                            style={styles.textRowActionHit}
-                          >
-                            <Text style={styles.textRowActionMuted}>Request tour</Text>
-                          </Pressable>
                         </View>
                       </View>
                     </>
@@ -8052,11 +9047,22 @@ export default function App() {
                             <Text style={styles.listingCatTitle} numberOfLines={2}>
                               {row.title}
                             </Text>
-                            <Text style={styles.listingCatMeta} numberOfLines={1}>
-                              {listingDetail.kind === 'bnb'
-                                ? `${(row as BnbListing).county} · ${(row as BnbListing).price}`
-                                : `${(row as HouseListing).distanceKm} km · ${(row as HouseListing).price}`}
-                            </Text>
+                            <ListingMetaText
+                              coords={row.coords}
+                              price={
+                                listingDetail.kind === 'bnb'
+                                  ? (row as BnbListing).price
+                                  : (row as HouseListing).price
+                              }
+                              reference={listingDistanceRef}
+                              fallbackCounty={
+                                listingDetail.kind === 'bnb'
+                                  ? (row as BnbListing).county
+                                  : (row as HouseListing).county
+                              }
+                              distanceColor={theme.primary}
+                              metaColor={theme.textMuted}
+                            />
                           </View>
                           <Text style={styles.listingCatChev}>›</Text>
                         </Pressable>
@@ -8263,10 +9269,15 @@ export default function App() {
                 <Text style={[styles.exploreKeyRowText, { color: theme.textPrimary, marginTop: 10 }]}>
                   {(listingPreviewEntity as BnbListing).title}
                 </Text>
-                <Text style={[styles.exploreKeyLead, { color: theme.textSecondary, marginTop: 4 }]}>
-                  {(listingPreviewEntity as BnbListing).county} · {(listingPreviewEntity as BnbListing).rating} ★ ·{' '}
-                  {(listingPreviewEntity as BnbListing).price}
-                </Text>
+                <ListingMetaText
+                  coords={(listingPreviewEntity as BnbListing).coords}
+                  price={`${(listingPreviewEntity as BnbListing).rating} ★ · ${(listingPreviewEntity as BnbListing).price}`}
+                  reference={listingDistanceRef}
+                  fallbackCounty={(listingPreviewEntity as BnbListing).county}
+                  distanceColor={theme.primary}
+                  metaColor={theme.textSecondary}
+                  style={{ ...styles.exploreKeyLead, marginTop: 4 }}
+                />
                 <Text style={[styles.exploreKeyFine, { color: theme.textMuted, marginTop: 8 }]} numberOfLines={3}>
                   {(listingPreviewEntity as BnbListing).exploreReason}
                 </Text>
@@ -8281,9 +9292,15 @@ export default function App() {
                 <Text style={[styles.exploreKeyRowText, { color: theme.textPrimary, marginTop: 10 }]}>
                   {(listingPreviewEntity as HouseListing).title}
                 </Text>
-                <Text style={[styles.exploreKeyLead, { color: theme.textSecondary, marginTop: 4 }]}>
-                  {(listingPreviewEntity as HouseListing).distanceKm} km · {(listingPreviewEntity as HouseListing).price}
-                </Text>
+                <ListingMetaText
+                  coords={(listingPreviewEntity as HouseListing).coords}
+                  price={(listingPreviewEntity as HouseListing).price}
+                  reference={listingDistanceRef}
+                  fallbackCounty={(listingPreviewEntity as HouseListing).county}
+                  distanceColor={theme.primary}
+                  metaColor={theme.textSecondary}
+                  style={{ ...styles.exploreKeyLead, marginTop: 4 }}
+                />
                 <Text style={[styles.exploreKeyFine, { color: theme.textMuted, marginTop: 8 }]} numberOfLines={3}>
                   {(listingPreviewEntity as HouseListing).detailHighlights[0] ?? 'Longer stays — book a viewing from the full sheet.'}
                 </Text>
@@ -8343,7 +9360,7 @@ export default function App() {
       journal: 'Journal',
     };
     const exploreChromeCue = `${lensLabels[exploreLens]} · ${
-      exploreScope === 'nearby' ? `Near ${currentCounty.charAt(0).toUpperCase()}${currentCounty.slice(1)}` : 'Everywhere'
+      exploreScope === 'nearby' ? `Near ${countyDisplayLabel}` : 'Everywhere'
     }`;
     const sheetLead =
       exploreLens === 'journal'
@@ -8987,7 +10004,7 @@ export default function App() {
                             return;
                           }
                           const c = selectedExploreCard.coords;
-                          setGuidedJourney({
+                          beginGuidedJourney({
                             end: c,
                             title: selectedExploreCard.title,
                             subtitle: selectedExploreCard.subtitle,
@@ -9161,7 +10178,7 @@ export default function App() {
       );
     }
     if (!isAuthed) return renderOnboarding();
-    if (activeTab === 'home' || activeTab === 'trips' || activeTab === 'profile') return renderHome();
+    if (activeTab === 'home' || activeTab === 'activity' || activeTab === 'profile') return renderHome();
     return renderHome();
   };
 
@@ -9176,55 +10193,104 @@ export default function App() {
       >
       {renderCurrent()}
 
-      <Modal
+      <BookedStaySheet
+        visible={bookedStaySheetBooking !== null}
+        booking={bookedStaySheetBooking}
+        listing={bookedStayListing}
+        loading={bookedStayLoading}
+        theme={theme}
+        navigateDisabled={!MAPBOX_ACCESS_TOKEN || !currentCoords}
+        onClose={() => {
+          setBookedStaySheetBooking(null);
+          setBookedStayListing(null);
+        }}
+        onStartTrip={startTripToBookedStay}
+        onRequestRide={() => {
+          if (!bookedStaySheetBooking) return;
+          void requestRideToListing(
+            bookedStaySheetBooking.listingId,
+            bookedStaySheetBooking.listing?.title ?? 'BnB stay',
+            'bnb',
+          );
+        }}
+      />
+
+      <ViewingRequestSheet
+        visible={viewingRequestTarget !== null}
+        listingTitle={viewingRequestTarget?.listingTitle ?? ''}
+        priceLabel={viewingRequestTarget?.priceLabel}
+        submitting={requestSubmitting}
+        theme={theme}
+        onClose={() => setViewingRequestTarget(null)}
+        onConfirm={async ({ pickupMode, userNote }) => {
+          if (!viewingRequestTarget) return;
+          await submitListingRequest(
+            'viewing',
+            viewingRequestTarget.listingId,
+            viewingRequestTarget.listingTitle,
+            viewingRequestTarget.catalog,
+            {
+              closeDeepPage: viewingRequestTarget.closeDeepPage,
+              pickupMode,
+              userNote,
+            },
+          );
+        }}
+      />
+
+      <ListingRequestSheet
+        visible={listingRequestSheetId !== null}
+        request={listingRequestDetail}
+        loading={listingRequestSheetLoading}
+        submitting={listingRequestReplySubmitting}
+        onClose={() => {
+          setListingRequestSheetId(null);
+          setListingRequestDetail(null);
+        }}
+        onReply={handleListingRequestReply}
+        theme={theme}
+      />
+
+      <BnbBookingSheet
+        visible={bnbBookingSheetOpen}
+        listingTitle={bnbBookingTarget?.title ?? ''}
+        priceLabel={bnbBookingTarget?.price ?? ''}
+        onClose={() => {
+          setBnbBookingSheetOpen(false);
+          setBnbBookingTarget(null);
+        }}
+        onConfirm={async () => {
+          if (!bnbBookingTarget) return;
+          await bookBnbStay(bnbBookingTarget.id, bnbBookingTarget.title, {
+            stayOnListing: homeDeepPage === 'listing-detail',
+          });
+        }}
+        submitting={requestSubmitting}
+        theme={theme}
+      />
+
+      <SubscriptionSheet
+        visible={subscriptionSheetOpen}
+        plans={subscriptionPlans}
+        selectedPlan={selectedSubscriptionPlan}
+        onSelectPlan={setSelectedSubscriptionPlan}
+        onClose={() => setSubscriptionSheetOpen(false)}
+        onSubscribe={(plan) => subscribeToKeja(plan)}
+        submitting={requestSubmitting}
+        theme={theme}
+      />
+
+      <GuidedNavigationModal
         visible={guidedJourney !== null && guidanceMapHtml !== null}
-        animationType="slide"
-        presentationStyle="fullScreen"
-        onRequestClose={() => setGuidedJourney(null)}
-      >
-        <View style={[styles.journeyModalRoot, { backgroundColor: theme.canvas }]}>
-          <View
-            style={[
-              styles.journeyModalTopBar,
-              { paddingTop: insets.top + 8, paddingHorizontal: gutter, borderBottomColor: theme.border },
-            ]}
-          >
-            <Pressable onPress={() => setGuidedJourney(null)} hitSlop={12}>
-              <Text style={styles.homeDeepBack}>← End route</Text>
-            </Pressable>
-            <Text style={[styles.journeyModalTitle, { color: theme.textPrimary }]}>Navigate</Text>
-            <View style={{ width: 72 }} />
-          </View>
-          {guidedJourney ? (
-            <View style={[styles.journeyModalDestStrip, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
-              <Text style={[styles.journeyModalEyebrow, { color: BRAND.gold }]}>HEADING TO</Text>
-              <Text style={[styles.journeyModalDestTitle, { color: theme.textPrimary }]} numberOfLines={2}>
-                {guidedJourney.title}
-              </Text>
-              {guidedJourney.subtitle ? (
-                <Text style={[styles.journeyModalDestSub, { color: theme.textSecondary }]} numberOfLines={2}>
-                  {guidedJourney.subtitle}
-                </Text>
-              ) : null}
-            </View>
-          ) : null}
-          {guidanceMapHtml ? (
-            <WebView
-              source={{ html: guidanceMapHtml }}
-              style={styles.journeyMapWebView}
-              originWhitelist={['*']}
-              javaScriptEnabled
-              domStorageEnabled
-              scrollEnabled={false}
-              bounces={false}
-              mixedContentMode="always"
-              allowsFullscreenVideo
-              setSupportMultipleWindows={false}
-              {...ANDROID_MAP_WEBVIEW_PROPS}
-            />
-          ) : null}
-        </View>
-      </Modal>
+        journey={guidedJourney}
+        guidanceMapHtml={guidanceMapHtml}
+        theme={theme}
+        gold={BRAND.gold}
+        topInset={insets.top}
+        horizontalPad={gutter}
+        onClose={() => setGuidedJourney(null)}
+      />
+
       <Modal
         visible={tourSheetTarget !== null && tourListing !== null}
         animationType="slide"
@@ -12087,6 +13153,14 @@ const createStyles = (theme: Theme) =>
       paddingTop: 12,
       paddingBottom: 14,
     },
+    listingUnlockCard: {
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      gap: 6,
+      marginVertical: 8,
+    },
     juxListingTitleRow: {
       flexDirection: 'row',
       alignItems: 'flex-start',
@@ -12462,6 +13536,22 @@ const createStyles = (theme: Theme) =>
       fontFamily: 'Inter_400Regular',
       color: theme.textMuted,
     },
+    homeDeepPageLeadDistance: {
+      fontFamily: 'Inter_600SemiBold',
+      color: theme.primary,
+    },
+    listingReservedBadge: {
+      alignSelf: 'flex-start',
+      marginTop: 8,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 999,
+      borderWidth: 1,
+    },
+    listingReservedBadgeText: {
+      fontSize: 12,
+      fontFamily: 'Inter_600SemiBold',
+    },
     listingCatChev: {
       fontSize: 18,
       color: theme.textMuted,
@@ -12585,6 +13675,36 @@ const createStyles = (theme: Theme) =>
       alignItems: 'center',
       gap: 6,
       marginBottom: 10,
+      flexWrap: 'wrap',
+    },
+    staysViewToggle: {
+      flexDirection: 'row',
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      padding: 3,
+      gap: 2,
+    },
+    staysViewModeBtn: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 9,
+    },
+    staysViewModeLabel: {
+      fontSize: 13,
+      fontFamily: 'Inter_500Medium',
+    },
+    staysRadiusChip: {
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+      borderWidth: StyleSheet.hairlineWidth,
+    },
+    staysRadiusChipText: {
+      fontSize: 12,
+      fontFamily: 'Inter_500Medium',
     },
     staysViewLink: {
       fontSize: 13,

@@ -30,6 +30,8 @@ type ThemeSlice = {
   mutedSurface: string;
 };
 
+type HomeQuickService = SwipeableService | 'movers';
+
 type Props = {
   slides: IntroHeroSlide[];
   carouselHint: string;
@@ -49,16 +51,17 @@ type Props = {
   listingsError?: string | null;
   onRetryListings?: () => void;
   onQuickService: (service: SwipeableService) => void;
-  onComingSoonService?: (service: SwipeableService) => void;
+  onComingSoonService?: (service: HomeQuickService) => void;
   onOpenStay: (id: string) => void;
   onOpenListing: (id: string, kind: 'bnb' | 'rental') => void;
   onOpenTrips: () => void;
   theme: ThemeSlice;
 };
 
-const QUICK_SERVICES: { key: SwipeableService; label: string; comingSoon?: boolean }[] = [
+const QUICK_SERVICES: { key: HomeQuickService; label: string; comingSoon?: boolean }[] = [
   { key: 'laundry', label: 'Fua' },
   { key: 'bnbs', label: 'Keja' },
+  { key: 'movers', label: 'Movers', comingSoon: true },
   { key: 'rides', label: 'Rides', comingSoon: true },
 ];
 
@@ -157,9 +160,16 @@ export function HomeHub({
         <>
           {popularStays.length > 0 ? (
             <>
-              <Text style={[styles.sectionLabel, { color: theme.textMuted }]}>
-                Popular stays nearby{hasLocation ? ` · ${nearbyRadiusKm} km` : ''}
-              </Text>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={[styles.sectionLabel, styles.sectionLabelInRow, { color: theme.textMuted }]}>
+                  Popular stays nearby{hasLocation ? ` · ${nearbyRadiusKm} km` : ''}
+                </Text>
+                {onBrowseListings ? (
+                  <Pressable onPress={onBrowseListings} hitSlop={8}>
+                    <Text style={[styles.browseLink, { color: theme.primary }]}>Browse catalog</Text>
+                  </Pressable>
+                ) : null}
+              </View>
               <CarouselZone>
                 <ScrollView
                   horizontal
@@ -187,9 +197,16 @@ export function HomeHub({
             </>
           ) : null}
 
-          <Text style={[styles.sectionLabel, { color: theme.textMuted }]}>
-            Popular listings{hasLocation ? ` · ${nearbyRadiusKm} km` : ''}
-          </Text>
+          <View style={styles.sectionHeaderRow}>
+            <Text style={[styles.sectionLabel, styles.sectionLabelInRow, { color: theme.textMuted }]}>
+              Popular listings{hasLocation ? ` · ${nearbyRadiusKm} km` : ''}
+            </Text>
+            {onBrowseListings ? (
+              <Pressable onPress={onBrowseListings} hitSlop={8}>
+                <Text style={[styles.browseLink, { color: theme.primary }]}>Browse catalog</Text>
+              </Pressable>
+            ) : null}
+          </View>
           {popularListings.length > 0 ? (
             <View style={[styles.placesList, { borderColor: theme.border, backgroundColor: theme.sheet }]}>
               {popularListings.map((listing, i) => (
@@ -216,6 +233,16 @@ export function HomeHub({
                   <Text style={[styles.placeChev, { color: theme.primary }]}>›</Text>
                 </Pressable>
               ))}
+              {onBrowseListings ? (
+                <Pressable
+                  style={[styles.browseCatalogFooter, { borderTopColor: theme.border }]}
+                  onPress={onBrowseListings}
+                >
+                  <Text style={[styles.browseCatalogFooterText, { color: theme.primary }]}>
+                    View all listings · BnB & rentals
+                  </Text>
+                </Pressable>
+              ) : null}
             </View>
           ) : (
             <View style={[styles.placesList, styles.placesListEmpty, { borderColor: theme.border, backgroundColor: theme.sheet }]}>
@@ -318,6 +345,33 @@ const styles = StyleSheet.create({
     fontFamily: 'Inter_600SemiBold',
     letterSpacing: 0.5,
     textTransform: 'uppercase',
+  },
+  sectionLabelInRow: {
+    marginTop: 0,
+    marginBottom: 0,
+    flex: 1,
+  },
+  sectionHeaderRow: {
+    marginTop: 14,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  browseLink: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
+  },
+  browseCatalogFooter: {
+    paddingVertical: 11,
+    paddingHorizontal: 12,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+  },
+  browseCatalogFooterText: {
+    fontSize: 12,
+    fontFamily: 'Inter_600SemiBold',
   },
   popularScroll: {
     gap: 10,

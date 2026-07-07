@@ -89,6 +89,37 @@ export type SubscriptionPlan = {
   label: string;
 };
 
+export type Subscription = {
+  id: string;
+  plan: string;
+  priceKes: number;
+  startsAt: string;
+  expiresAt: string;
+  paymentStatus: string;
+  mpesaReceipt?: string | null;
+  createdAt: string;
+  active: boolean;
+};
+
+export type BnbBooking = {
+  id: string;
+  listingId: string;
+  listing?: { id: string; title: string; neighborhood: string; county: string };
+  checkIn: string;
+  checkOut: string;
+  guests: number;
+  nights: number;
+  nightlyRate: number;
+  cleaningFee: number;
+  totalKes: number;
+  status: string;
+  paymentStatus: string;
+  mpesaReceipt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  confirmed: boolean;
+};
+
 export type LaundryOrder = {
   id: string;
   pickupMode: string;
@@ -110,6 +141,7 @@ export type LaundryOrder = {
   etaMinutes?: number;
   createdAt: string;
   paymentStatus?: string;
+  customerConfirmedAt?: string | null;
 };
 
 export type ServiceFeedback = {
@@ -127,13 +159,41 @@ export type ServiceFeedback = {
 
 export type ListingRequestKind = 'viewing' | 'tour' | 'stay';
 
+export type ViewingPickupMode = 'taxi' | 'rider';
+
+export type ListingRequestStatus =
+  | 'requested'
+  | 'agent_contacted'
+  | 'rider_assigned'
+  | 'rider_en_route'
+  | 'viewing_completed'
+  | 'cancelled';
+
+export type ListingRequestMessage = {
+  id: string;
+  senderRole: 'user' | 'admin' | 'system';
+  body: string;
+  createdAt: string;
+};
+
 export type ListingRequest = {
   id: string;
   listingId: string;
   listingTitle: string;
   kind: ListingRequestKind;
-  status: string;
+  service: 'rental' | 'bnb';
+  status: ListingRequestStatus | string;
+  statusLabel?: string;
+  stepIndex?: number;
+  userNote?: string | null;
+  pickupMode?: ViewingPickupMode | null;
+  pickupModeLabel?: string | null;
+  riderName?: string | null;
+  riderPhone?: string | null;
+  scheduledAt?: string | null;
   createdAt: string;
+  updatedAt?: string;
+  messages?: ListingRequestMessage[];
 };
 
 export type LaundryEstimate = {
