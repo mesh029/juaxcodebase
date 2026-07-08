@@ -1,9 +1,13 @@
 export { Colors, type ColorScheme, type ThemeColors } from './colors';
-export { Type, FontFamily } from './typography';
+export { Type, TextRole, FontFamily } from './typography';
 export { Spacing, Radius, Touch } from './spacing';
-export { Motion, HapticMap } from './motion';
+export { ComponentSize } from './components';
+export { Motion, HapticMap, configureLayoutAnimation } from './motion';
 export { SheetConfig, Pricing } from './config';
-export { Shadows } from './shadows';
+export { Shadows, DarkElevation } from './shadows';
+export { cardChrome, nestedChrome, sheetChrome, trackChrome, sheetElevationStyle } from './surfaces';
 export { getBottomInset } from './layout';
 export { MAKE } from './make';
 export { BRAND } from './brand';
+export { HeroOverlay } from './overlays';
+export { A11y, tabLabel, chipLabel, pagerDotLabel } from './a11y';

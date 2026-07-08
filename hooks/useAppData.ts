@@ -166,7 +166,7 @@ export function useAppData() {
   }, [applyListingsResult]);
 
   const refreshNearbyListings = useCallback(
-    async (lat: number, lng: number, radiusKm: number, county = 'kisumu') => {
+    async (lat: number, lng: number, radiusKm: number, county?: string) => {
       const gen = ++listingsRequestGenRef.current;
       const isInitial = !listingsLoadedRef.current;
       if (isInitial) setListingsFetching(true);

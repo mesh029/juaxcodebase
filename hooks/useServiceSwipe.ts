@@ -9,8 +9,10 @@ export type SwipeableSegment = (typeof SWIPEABLE_SEGMENTS)[number];
 /** @deprecated use SwipeableSegment */
 export type SwipeableService = Exclude<SwipeableSegment, 'home'>;
 
-const SWIPE_DISTANCE = 56;
-const HORIZONTAL_RATIO = 1.5;
+const SWIPE_START_DISTANCE = 40;
+const SWIPE_DISTANCE = 88;
+const HORIZONTAL_RATIO = 2;
+const MIN_HORIZONTAL_VELOCITY = 0.18;
 
 type Options = {
   enabled: boolean;
@@ -45,12 +47,21 @@ export function useServiceSwipePan({ enabled, active, onChange }: Options) {
           if (!enabledRef.current) return false;
           if (blockRef?.current) return false;
           const { dx, dy } = gesture;
-          return Math.abs(dx) > 24 && Math.abs(dx) > Math.abs(dy) * HORIZONTAL_RATIO;
+          return (
+            Math.abs(dx) > SWIPE_START_DISTANCE &&
+            Math.abs(dx) > Math.abs(dy) * HORIZONTAL_RATIO
+          );
         },
         onPanResponderRelease: (_, gesture) => {
           if (!enabledRef.current || blockRef?.current) return;
-          const { dx, dy } = gesture;
-          if (Math.abs(dx) < SWIPE_DISTANCE || Math.abs(dx) < Math.abs(dy) * HORIZONTAL_RATIO) return;
+          const { dx, dy, vx } = gesture;
+          if (
+            Math.abs(dx) < SWIPE_DISTANCE ||
+            Math.abs(dx) < Math.abs(dy) * HORIZONTAL_RATIO ||
+            Math.abs(vx) < MIN_HORIZONTAL_VELOCITY
+          ) {
+            return;
+          }
           if (dx < 0) goAdjacent('next');
           else goAdjacent('prev');
         },

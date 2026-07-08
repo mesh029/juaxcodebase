@@ -1,7 +1,9 @@
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { BRAND } from '../../theme/brand';
+import { DarkElevation, A11y, FontFamily, HapticMap, Motion, sheetChrome, Spacing, tabLabel, Touch } from '../../theme';
+import { AccessibleText } from '../ui/AccessibleText';
 
-export type ERTabItem<T extends string> = { key: T; label: string; icon: string };
+export type ERTabItem<T extends string> = { key: T; label: string; icon: string; badgeCount?: number };
 
 type Props<T extends string> = {
   tabs: ERTabItem<T>[];
@@ -27,30 +29,53 @@ export function ERTabBar<T extends string>({
   darkMode = false,
 }: Props<T>) {
   const idle = darkMode ? BRAND.dark.tabIdle : BRAND.light.tabIdle;
-  const barBg = darkMode ? BRAND.dark.canvas : BRAND.light.canvas;
-  const border = darkMode ? BRAND.dark.border : BRAND.light.border;
+  const barChrome = sheetChrome(darkMode);
+  const barBg = darkMode ? BRAND.dark.sheet : BRAND.light.sheet;
 
   return (
     <View
       style={[
         styles.root,
+        barChrome,
+        darkMode && DarkElevation.sheet,
         {
           backgroundColor: barBg,
-          borderTopColor: border,
           paddingBottom: bottomInset,
           paddingHorizontal: horizontalPad,
         },
       ]}
+      accessibilityRole="tablist"
     >
       <View style={styles.row}>
-        {tabs.map(({ key, label, icon }) => {
+        {tabs.map(({ key, label, icon, badgeCount }) => {
           const on = active === key;
           return (
-            <Pressable key={key} onPress={() => onChange(key)} style={styles.item}>
-              <Text style={[styles.icon, { color: on ? BRAND.primary : idle, fontWeight: on ? '700' : '400' }]}>
-                {icon}
-              </Text>
-              <Text style={[styles.label, { color: on ? BRAND.primary : idle }]}>{label}</Text>
+            <Pressable
+              key={key}
+              accessibilityRole="tab"
+              accessibilityLabel={tabLabel(label, on, badgeCount)}
+              accessibilityState={{ selected: on }}
+              hitSlop={A11y.compactHitSlop}
+              onPress={() => {
+                if (!on) HapticMap.selection();
+                onChange(key);
+              }}
+              style={({ pressed }) => [styles.item, pressed && styles.itemPressed]}
+            >
+              <View style={styles.iconWrap} importantForAccessibility="no-hide-descendants">
+                <AccessibleText
+                  style={[styles.icon, { color: on ? BRAND.primary : idle, fontWeight: on ? '700' : '400' }]}
+                  accessibilityElementsHidden
+                >
+                  {icon}
+                </AccessibleText>
+                {badgeCount && badgeCount > 0 ? (
+                  <View style={styles.badge} accessibilityElementsHidden>
+                    <AccessibleText style={styles.badgeText}>{badgeCount > 9 ? '9+' : String(badgeCount)}</AccessibleText>
+                  </View>
+                ) : null}
+              </View>
+              <AccessibleText style={[styles.label, { color: on ? BRAND.primary : idle }]}>{label}</AccessibleText>
             </Pressable>
           );
         })}
@@ -62,8 +87,7 @@ export function ERTabBar<T extends string>({
 const styles = StyleSheet.create({
   root: {
     flexShrink: 0,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingTop: 12,
+    paddingTop: Spacing[1.5],
   },
   row: {
     flexDirection: 'row',
@@ -74,17 +98,43 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 44,
-    paddingVertical: 4,
-    paddingHorizontal: 16,
+    minHeight: Touch.minSize,
+    paddingVertical: Spacing[0.5],
+    paddingHorizontal: Spacing[2],
     gap: 2,
+  },
+  itemPressed: {
+    opacity: Motion.press.opacity,
+  },
+  iconWrap: {
+    position: 'relative',
+    minWidth: 20,
+    alignItems: 'center',
   },
   icon: {
     fontSize: 19,
     marginBottom: 2,
   },
+  badge: {
+    position: 'absolute',
+    top: -5,
+    right: -12,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#E11D48',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  badgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontFamily: 'Inter_700Bold',
+    lineHeight: 11,
+  },
   label: {
     fontSize: 12,
-    fontFamily: 'Inter_500Medium',
+    fontFamily: FontFamily.medium,
   },
 });

@@ -36,6 +36,8 @@ export const BRAND = {
     canvas: D.canvas,
     sheet: D.sheet,
     surface: D.surface,
+    elevated: D.elevated,
+    primaryFaint: D.primaryFaint,
     muted: D.surface,
     border: D.border,
     text: D.text,

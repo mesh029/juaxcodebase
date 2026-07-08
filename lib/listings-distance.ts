@@ -1,4 +1,4 @@
-type Coordinates = { latitude: number; longitude: number };
+export type Coordinates = { latitude: number; longitude: number };
 type CountyKey = 'nairobi' | 'mombasa' | 'kisumu' | 'nyamira';
 
 export const COUNTY_CENTER_COORDS: Record<CountyKey, Coordinates> = {
@@ -19,7 +19,7 @@ export const NO_DISTANCE_REFERENCE: ListingDistanceReference = {
   isApproximate: true,
 };
 
-function getDistanceKm(from: Coordinates, to: Coordinates): number {
+export function getDistanceKm(from: Coordinates, to: Coordinates): number {
   const toRadians = (value: number) => (value * Math.PI) / 180;
   const earthRadiusKm = 6371;
   const deltaLat = toRadians(to.latitude - from.latitude);

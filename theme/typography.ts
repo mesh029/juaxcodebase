@@ -1,6 +1,6 @@
 /**
- * iOS Dynamic Type–aligned scale — do not invent one-off sizes.
- * MCP: theme://typography
+ * Core typography scale with semantic aliases for app UI.
+ * Keep hierarchy consistent and avoid one-off sizes.
  */
 export const Type = {
   largeTitle: { fontSize: 34, fontWeight: '700' as const, lineHeight: 41, letterSpacing: 0.37 },
@@ -14,6 +14,17 @@ export const Type = {
   footnote: { fontSize: 13, fontWeight: '400' as const, lineHeight: 18, letterSpacing: -0.08 },
   caption1: { fontSize: 12, fontWeight: '400' as const, lineHeight: 16, letterSpacing: 0 },
   caption2: { fontSize: 11, fontWeight: '400' as const, lineHeight: 13, letterSpacing: 0.07 },
+} as const;
+
+export const TextRole = {
+  hero: Type.title1,
+  sectionTitle: Type.title3,
+  cardTitle: Type.headline,
+  cardMeta: Type.footnote,
+  body: Type.subhead,
+  bodyStrong: Type.callout,
+  label: Type.caption1,
+  overline: Type.caption2,
 } as const;
 
 /** Inter font family names loaded via @expo-google-fonts/inter */

@@ -1,8 +1,13 @@
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { IntroHeroCarousel, type IntroHeroSlide } from '../IntroHeroCarousel';
+import { HomeHubSkeleton } from './HomeHubSkeleton';
 import { CarouselZone } from '../chrome/CarouselZone';
 import type { SwipeableService } from '../../hooks/useServiceSwipe';
-import { AppIcon, serviceIconName } from '../ui/AppIcon';
+import { AppIcon, homeQuickIconName } from '../ui/AppIcon';
+import { EmptyState } from '../ui/EmptyState';
+import { PressableScale } from '../ui/PressableScale';
+import { A11y, ComponentSize, FontFamily, HapticMap, Motion, Radius, Spacing, TextRole, Touch, cardChrome, chipLabel, nestedChrome } from '../../theme';
+import { AccessibleText } from '../ui/AccessibleText';
 
 export type PopularStay = {
   id: string;
@@ -30,14 +35,12 @@ type ThemeSlice = {
   mutedSurface: string;
 };
 
-type HomeQuickService = SwipeableService | 'movers';
+type HomeQuickService = SwipeableService | 'movers' | 'more';
 
 type Props = {
   slides: IntroHeroSlide[];
   carouselHint: string;
   cardWidth: number;
-  locationLabel: string;
-  county: string;
   darkMode?: boolean;
   activeTripCount?: number;
   popularStays: PopularStay[];
@@ -52,25 +55,32 @@ type Props = {
   onRetryListings?: () => void;
   onQuickService: (service: SwipeableService) => void;
   onComingSoonService?: (service: HomeQuickService) => void;
+  onOpenMore?: () => void;
   onOpenStay: (id: string) => void;
   onOpenListing: (id: string, kind: 'bnb' | 'rental') => void;
   onOpenTrips: () => void;
+  onPopularCarouselTouchStart?: () => void;
+  onPopularCarouselTouchEnd?: () => void;
   theme: ThemeSlice;
 };
 
-const QUICK_SERVICES: { key: HomeQuickService; label: string; comingSoon?: boolean }[] = [
-  { key: 'laundry', label: 'Fua' },
-  { key: 'bnbs', label: 'Keja' },
-  { key: 'movers', label: 'Movers', comingSoon: true },
-  { key: 'rides', label: 'Rides', comingSoon: true },
+const QUICK_SERVICES: {
+  key: HomeQuickService;
+  label: string;
+  comingSoon?: boolean;
+  iconColor: string;
+}[] = [
+  { key: 'laundry', label: 'Fua', iconColor: '#E85A1C' },
+  { key: 'bnbs', label: 'Keja', iconColor: '#2F9E6A' },
+  { key: 'movers', label: 'Movers', comingSoon: true, iconColor: '#3B82F6' },
+  { key: 'rides', label: 'Rides', comingSoon: true, iconColor: '#8B5CF6' },
+  { key: 'more', label: 'More', iconColor: '#6B7280' },
 ];
 
 export function HomeHub({
   slides,
   carouselHint,
   cardWidth,
-  locationLabel,
-  county,
   darkMode = false,
   activeTripCount = 0,
   popularStays,
@@ -85,28 +95,28 @@ export function HomeHub({
   onRetryListings,
   onQuickService,
   onComingSoonService,
+  onOpenMore,
   onOpenStay,
   onOpenListing,
   onOpenTrips,
+  onPopularCarouselTouchStart,
+  onPopularCarouselTouchEnd,
   theme,
 }: Props) {
-  const stayCardW = Math.min(200, Math.max(160, Math.round(cardWidth * 0.58)));
+  const stayCardW = Math.min(228, Math.max(176, Math.round(cardWidth * 0.62)));
+  const quickGap = Spacing[1.5];
+  const quickTileW = Math.max(64, Math.floor((cardWidth - quickGap * 4) / 5));
+  const cardSurface = cardChrome(darkMode);
+  const nestSurface = nestedChrome(darkMode);
+  const rowDivider = darkMode ? undefined : { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.border };
 
   return (
     <View style={styles.root}>
-      <View style={styles.logoRow}>
-        <Text style={[styles.logoMark, { color: theme.primary }]}>Jua</Text>
-        <Text style={[styles.logoMarkX, { color: theme.textPrimary }]}>X</Text>
-      </View>
-      <Text style={[styles.locationLine, { color: theme.textSecondary }]} numberOfLines={1}>
-        {locationLabel} · {county}
-      </Text>
-
       <CarouselZone>
         <IntroHeroCarousel
           slides={slides}
           cardWidth={cardWidth}
-          cardHeight={156}
+          cardHeight={196}
           darkMode={darkMode}
           hint={carouselHint}
         />
@@ -114,43 +124,66 @@ export function HomeHub({
 
       <View style={styles.quickRow}>
         {QUICK_SERVICES.map((svc) => (
-          <Pressable
+          <PressableScale
             key={svc.key}
+            accessibilityRole="button"
+            accessibilityLabel={chipLabel(svc.label, false, svc.comingSoon)}
+            hitSlop={A11y.compactHitSlop}
             style={[
               styles.quickPill,
-              { borderColor: theme.border, backgroundColor: theme.sheet },
+              { width: quickTileW },
+              darkMode ? nestSurface : { borderColor: theme.border, backgroundColor: theme.sheet },
               svc.comingSoon && styles.quickPillSoon,
             ]}
+            android_ripple={{ color: `${theme.primary}22` }}
             onPress={() => {
+              HapticMap.light();
+              if (svc.key === 'more') {
+                onOpenMore?.();
+                return;
+              }
               if (svc.comingSoon) {
                 onComingSoonService?.(svc.key);
                 return;
               }
-              onQuickService(svc.key);
+              if (svc.key === 'laundry' || svc.key === 'bnbs' || svc.key === 'rides') {
+                onQuickService(svc.key);
+              }
             }}
           >
-            <AppIcon name={serviceIconName(svc.key)} size={18} color={theme.textSecondary} />
-            <Text style={[styles.quickLabel, { color: theme.textPrimary }]}>{svc.label}</Text>
+            <View style={[styles.quickIconWrap, { backgroundColor: `${svc.iconColor}18` }]}>
+              <AppIcon name={homeQuickIconName(svc.key)} size={ComponentSize.icon.xl} color={svc.iconColor} />
+            </View>
+            <AccessibleText style={[styles.quickLabel, { color: theme.textPrimary }]} numberOfLines={1}>
+              {svc.label}
+            </AccessibleText>
             {svc.comingSoon ? (
-              <View style={[styles.quickSoonBadge, { backgroundColor: theme.mutedSurface }]}>
-                <Text style={[styles.quickSoonText, { color: theme.textMuted }]}>Soon</Text>
+              <View style={[styles.quickSoonBadge, { backgroundColor: theme.mutedSurface }]} accessibilityElementsHidden>
+                <AccessibleText style={[styles.quickSoonText, { color: theme.textMuted }]}>Soon</AccessibleText>
               </View>
             ) : null}
-          </Pressable>
+          </PressableScale>
         ))}
       </View>
 
-      {listingsLoading ? (
-        <View style={styles.loadingBlock}>
+      {listingsLoading && !listingsLoaded ? (
+        <HomeHubSkeleton cardWidth={cardWidth} darkMode={darkMode} />
+      ) : listingsLoading ? (
+        <View style={styles.loadingBlock} accessibilityRole="progressbar" accessibilityLabel="Refreshing listings">
           <ActivityIndicator size="small" color={theme.primary} />
-          <Text style={[styles.loadingText, { color: theme.textSecondary }]}>Loading listings from server…</Text>
+          <AccessibleText style={[styles.loadingText, { color: theme.textSecondary }]}>Refreshing listings…</AccessibleText>
         </View>
       ) : listingsError ? (
         <View style={styles.loadingBlock}>
           <Text style={[styles.loadingText, { color: theme.textSecondary, flex: 1 }]}>{listingsError}</Text>
           {onRetryListings ? (
-            <Pressable onPress={onRetryListings} hitSlop={8}>
-              <Text style={{ color: theme.primary, fontWeight: '600' }}>Retry</Text>
+            <Pressable
+              onPress={onRetryListings}
+              hitSlop={A11y.hitSlop}
+              accessibilityRole="button"
+              accessibilityLabel="Retry loading listings"
+            >
+              <AccessibleText style={{ color: theme.primary, fontWeight: '600' }}>Retry</AccessibleText>
             </Pressable>
           ) : null}
         </View>
@@ -165,8 +198,13 @@ export function HomeHub({
                   Popular stays nearby{hasLocation ? ` · ${nearbyRadiusKm} km` : ''}
                 </Text>
                 {onBrowseListings ? (
-                  <Pressable onPress={onBrowseListings} hitSlop={8}>
-                    <Text style={[styles.browseLink, { color: theme.primary }]}>Browse catalog</Text>
+                  <Pressable
+                    onPress={onBrowseListings}
+                    hitSlop={A11y.hitSlop}
+                    accessibilityRole="link"
+                    accessibilityLabel="Browse all listings catalog"
+                  >
+                    <AccessibleText style={[styles.browseLink, { color: theme.primary }]}>Browse catalog</AccessibleText>
                   </Pressable>
                 ) : null}
               </View>
@@ -176,12 +214,25 @@ export function HomeHub({
                   showsHorizontalScrollIndicator={false}
                   contentContainerStyle={styles.popularScroll}
                   decelerationRate="fast"
+                  onScrollBeginDrag={onPopularCarouselTouchStart}
+                  onScrollEndDrag={onPopularCarouselTouchEnd}
+                  onMomentumScrollBegin={onPopularCarouselTouchStart}
+                  onMomentumScrollEnd={onPopularCarouselTouchEnd}
+                  onTouchStart={onPopularCarouselTouchStart}
+                  onTouchEnd={onPopularCarouselTouchEnd}
+                  onTouchCancel={onPopularCarouselTouchEnd}
                 >
                   {popularStays.map((stay) => (
-                    <Pressable
+                    <PressableScale
                       key={stay.id}
-                      style={[styles.stayCard, { width: stayCardW, borderColor: theme.border, backgroundColor: theme.sheet }]}
-                      onPress={() => onOpenStay(stay.id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${stay.title}, ${stay.meta}`}
+                      style={[styles.stayCard, { width: stayCardW }, cardSurface]}
+                      android_ripple={{ color: `${theme.primary}18` }}
+                      onPress={() => {
+                        HapticMap.light();
+                        onOpenStay(stay.id);
+                      }}
                     >
                       <Image source={stay.image} style={styles.stayThumb} resizeMode="cover" />
                       <Text style={[styles.stayTitle, { color: theme.textPrimary }]} numberOfLines={2}>
@@ -190,7 +241,7 @@ export function HomeHub({
                       <Text style={[styles.stayMeta, { color: theme.textSecondary }]} numberOfLines={1}>
                         {stay.meta}
                       </Text>
-                    </Pressable>
+                    </PressableScale>
                   ))}
                 </ScrollView>
               </CarouselZone>
@@ -208,18 +259,22 @@ export function HomeHub({
             ) : null}
           </View>
           {popularListings.length > 0 ? (
-            <View style={[styles.placesList, { borderColor: theme.border, backgroundColor: theme.sheet }]}>
+            <View style={[styles.placesList, cardSurface]}>
               {popularListings.map((listing, i) => (
                 <Pressable
                   key={`${listing.kind}-${listing.id}`}
-                  style={[
+                  accessibilityRole="button"
+                  accessibilityLabel={`${listing.title}, ${listing.subtitle}`}
+                  style={({ pressed }) => [
                     styles.placeRow,
-                    i < popularListings.length - 1 && {
-                      borderBottomWidth: StyleSheet.hairlineWidth,
-                      borderBottomColor: theme.border,
-                    },
+                    i < popularListings.length - 1 && rowDivider,
+                    pressed && styles.rowPressed,
                   ]}
-                  onPress={() => onOpenListing(listing.id, listing.kind)}
+                  android_ripple={{ color: `${theme.primary}14` }}
+                  onPress={() => {
+                    HapticMap.light();
+                    onOpenListing(listing.id, listing.kind);
+                  }}
                 >
                   <Image source={listing.image} style={[styles.listingThumb, { backgroundColor: theme.mutedSurface }]} resizeMode="cover" />
                   <View style={{ flex: 1 }}>
@@ -245,78 +300,76 @@ export function HomeHub({
               ) : null}
             </View>
           ) : (
-            <View style={[styles.placesList, styles.placesListEmpty, { borderColor: theme.border, backgroundColor: theme.sheet }]}>
-              <Text style={[styles.placeSub, styles.placesEmptyText, { color: theme.textSecondary }]}>
-                {locationLoading
+            <EmptyState
+              icon="📍"
+              title="No listings nearby"
+              description={
+                locationLoading
                   ? 'Finding listings near you…'
                   : !hasLocation
                     ? 'Turn on location to see popular listings near you.'
-                    : `No popular listings within ${nearbyRadiusKm} km of you.`}
-              </Text>
-              {hasLocation && !locationLoading && onBrowseListings ? (
-                <Pressable onPress={onBrowseListings} hitSlop={8} style={styles.placesEmptyAction}>
-                  <Text style={[styles.placesEmptyLink, { color: theme.primary }]}>Browse all listings</Text>
-                </Pressable>
-              ) : null}
-            </View>
+                    : `Nothing popular within ${nearbyRadiusKm} km yet.`
+              }
+              actionLabel={hasLocation && !locationLoading && onBrowseListings ? 'Browse all listings' : undefined}
+              onAction={hasLocation && !locationLoading ? onBrowseListings : undefined}
+              darkMode={darkMode}
+              mutedSurface={theme.mutedSurface}
+              textPrimary={theme.textPrimary}
+              textSecondary={theme.textSecondary}
+              primary={theme.primary}
+              border={theme.border}
+            />
           )}
         </>
       ) : null}
 
-      <Pressable
-        style={[styles.tripsRow, { borderColor: theme.border, backgroundColor: theme.mutedSurface }]}
-        onPress={onOpenTrips}
+      <PressableScale
+        accessibilityRole="button"
+        accessibilityLabel={`Trips and orders, ${activeTripCount > 0 ? `${activeTripCount} active` : 'track bookings'}`}
+        style={[styles.tripsRow, darkMode ? cardSurface : { borderColor: theme.border, backgroundColor: theme.mutedSurface }]}
+        onPress={() => {
+          HapticMap.light();
+          onOpenTrips();
+        }}
       >
         <Text style={[styles.tripsRowLabel, { color: theme.textPrimary }]}>Trips & orders</Text>
         <Text style={[styles.tripsRowMeta, { color: theme.textSecondary }]}>
           {activeTripCount > 0 ? `${activeTripCount} active` : 'Track bookings'}
         </Text>
         <Text style={[styles.tripsChev, { color: theme.primary }]}>›</Text>
-      </Pressable>
+      </PressableScale>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   root: {
-    paddingBottom: 12,
-  },
-  logoRow: {
-    flexDirection: 'row',
-    alignItems: 'baseline',
-    marginBottom: 2,
-  },
-  logoMark: {
-    fontSize: 26,
-    fontFamily: 'Inter_700Bold',
-    letterSpacing: -0.8,
-  },
-  logoMarkX: {
-    fontSize: 26,
-    fontFamily: 'Inter_700Bold',
-    letterSpacing: -0.8,
-  },
-  locationLine: {
-    fontSize: 12,
-    fontFamily: 'Inter_500Medium',
-    marginBottom: 12,
+    paddingBottom: Spacing[2],
   },
   quickRow: {
     flexDirection: 'row',
-    gap: 8,
-    marginTop: 12,
-    marginBottom: 4,
+    gap: Spacing[1.5],
+    marginTop: Spacing[1.5],
+    marginBottom: Spacing[1],
   },
   quickPill: {
-    flex: 1,
-    flexDirection: 'row',
+    minHeight: 88,
+    flexDirection: 'column',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
+    gap: Spacing[1],
+    paddingVertical: Spacing[1.5],
+    paddingHorizontal: Spacing[0.5],
+    borderRadius: Radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
     position: 'relative',
+  },
+  quickIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: Radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   quickPillSoon: {
     opacity: 0.92,
@@ -324,25 +377,29 @@ const styles = StyleSheet.create({
   quickSoonBadge: {
     position: 'absolute',
     top: -6,
-    right: 4,
-    paddingHorizontal: 5,
+    right: 2,
+    paddingHorizontal: Spacing[0.5],
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: Radius.xs,
   },
   quickSoonText: {
-    fontSize: 8,
-    fontFamily: 'Inter_700Bold',
+    fontSize: 9,
+    fontFamily: FontFamily.bold,
     letterSpacing: 0.3,
   },
   quickLabel: {
-    fontSize: 13,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: 11,
+    lineHeight: 14,
+    fontFamily: FontFamily.semibold,
+    textAlign: 'center',
+    width: '100%',
   },
   sectionLabel: {
-    marginTop: 14,
-    marginBottom: 8,
-    fontSize: 11,
-    fontFamily: 'Inter_600SemiBold',
+    marginTop: Spacing[3],
+    marginBottom: Spacing[1],
+    fontSize: TextRole.overline.fontSize,
+    lineHeight: TextRole.overline.lineHeight,
+    fontFamily: FontFamily.semibold,
     letterSpacing: 0.5,
     textTransform: 'uppercase',
   },
@@ -352,133 +409,127 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   sectionHeaderRow: {
-    marginTop: 14,
-    marginBottom: 8,
+    marginTop: Spacing[3],
+    marginBottom: Spacing[1],
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 8,
+    gap: Spacing[1],
   },
   browseLink: {
-    fontSize: 12,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.label.fontSize,
+    lineHeight: TextRole.label.lineHeight,
+    fontFamily: FontFamily.semibold,
   },
   browseCatalogFooter: {
-    paddingVertical: 11,
-    paddingHorizontal: 12,
+    paddingVertical: Spacing[1.5],
+    paddingHorizontal: Spacing[1.5],
     borderTopWidth: StyleSheet.hairlineWidth,
     alignItems: 'center',
   },
   browseCatalogFooterText: {
-    fontSize: 12,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.label.fontSize,
+    lineHeight: TextRole.label.lineHeight,
+    fontFamily: FontFamily.semibold,
   },
   popularScroll: {
-    gap: 10,
-    paddingRight: 4,
+    gap: Spacing[1.5],
+    paddingRight: Spacing[0.5],
   },
   stayCard: {
-    borderRadius: 12,
-    borderWidth: 1,
+    borderRadius: Radius.md,
     overflow: 'hidden',
   },
   stayThumb: {
     width: '100%',
-    height: 88,
+    height: 108,
   },
   stayTitle: {
-    fontSize: 13,
-    fontFamily: 'Inter_600SemiBold',
-    paddingHorizontal: 10,
-    paddingTop: 8,
+    fontSize: TextRole.cardTitle.fontSize,
+    lineHeight: TextRole.cardTitle.lineHeight,
+    fontFamily: FontFamily.semibold,
+    paddingHorizontal: Spacing[1.5],
+    paddingTop: Spacing[1.5],
   },
   stayMeta: {
-    fontSize: 11,
-    fontFamily: 'Inter_500Medium',
-    paddingHorizontal: 10,
-    paddingBottom: 10,
+    fontSize: TextRole.cardMeta.fontSize,
+    lineHeight: TextRole.cardMeta.lineHeight,
+    fontFamily: FontFamily.medium,
+    paddingHorizontal: Spacing[1.5],
+    paddingBottom: Spacing[1.5],
     paddingTop: 2,
   },
   placesList: {
-    borderRadius: 12,
-    borderWidth: 1,
+    borderRadius: Radius.md,
     overflow: 'hidden',
-  },
-  placesListEmpty: {
-    minHeight: 52,
-    justifyContent: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    gap: 6,
-  },
-  placesEmptyText: {
-    lineHeight: 17,
-  },
-  placesEmptyAction: {
-    alignSelf: 'flex-start',
-  },
-  placesEmptyLink: {
-    fontSize: 12,
-    fontFamily: 'Inter_600SemiBold',
   },
   placeRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
+    gap: Spacing[1.5],
+    paddingVertical: Spacing[1.5],
+    paddingHorizontal: Spacing[1.5],
+  },
+  rowPressed: {
+    opacity: Motion.press.opacity,
   },
   listingThumb: {
-    width: 40,
-    height: 40,
-    borderRadius: 8,
+    width: 52,
+    height: 52,
+    borderRadius: Radius.sm,
     backgroundColor: '#E4E4E7',
   },
   placeName: {
-    fontSize: 14,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.bodyStrong.fontSize,
+    lineHeight: TextRole.bodyStrong.lineHeight,
+    fontFamily: FontFamily.semibold,
   },
   placeSub: {
-    marginTop: 1,
-    fontSize: 11,
-    fontFamily: 'Inter_500Medium',
+    marginTop: Spacing[0.5],
+    fontSize: TextRole.cardMeta.fontSize,
+    lineHeight: TextRole.cardMeta.lineHeight,
+    fontFamily: FontFamily.medium,
   },
   placeChev: {
-    fontSize: 18,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: 20,
+    fontFamily: FontFamily.semibold,
   },
   tripsRow: {
-    marginTop: 14,
+    marginTop: Spacing[3],
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    borderRadius: 12,
+    minHeight: Touch.comfortSize,
+    paddingVertical: Spacing[1.5],
+    paddingHorizontal: Spacing[2],
+    borderRadius: Radius.md,
     borderWidth: 1,
-    gap: 8,
+    gap: Spacing[1],
   },
   tripsRowLabel: {
     flex: 1,
-    fontSize: 14,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.bodyStrong.fontSize,
+    lineHeight: TextRole.bodyStrong.lineHeight,
+    fontFamily: FontFamily.semibold,
   },
   tripsRowMeta: {
-    fontSize: 12,
-    fontFamily: 'Inter_500Medium',
+    fontSize: TextRole.label.fontSize,
+    lineHeight: TextRole.label.lineHeight,
+    fontFamily: FontFamily.medium,
   },
   tripsChev: {
-    fontSize: 18,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: 20,
+    fontFamily: FontFamily.semibold,
   },
   loadingBlock: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 10,
-    paddingVertical: 28,
+    gap: Spacing[1.5],
+    paddingVertical: Spacing[4],
   },
   loadingText: {
-    fontSize: 13,
-    fontFamily: 'Inter_500Medium',
+    fontSize: TextRole.label.fontSize,
+    lineHeight: TextRole.label.lineHeight,
+    fontFamily: FontFamily.medium,
   },
 });

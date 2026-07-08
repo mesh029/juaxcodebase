@@ -202,14 +202,14 @@ export async function fetchListingsNearby(
   lng: number,
   radiusKm = 5,
   type?: 'rental' | 'bnb',
-  county = 'kisumu',
+  county?: string,
 ): Promise<PublicListing[]> {
   const params = new URLSearchParams({
     lat: String(lat),
     lng: String(lng),
     radiusKm: String(radiusKm),
-    county,
   });
+  if (county) params.set('county', county);
   if (type) params.set('type', type);
   const data = await api<{ listings: PublicListing[] }>(
     `/api/v1/listings/nearby?${params.toString()}`,

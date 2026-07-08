@@ -5,14 +5,16 @@ import {
   ImageSourcePropType,
   NativeScrollEvent,
   NativeSyntheticEvent,
-  Pressable,
   StyleSheet,
-  Text,
   View,
   type ListRenderItem,
 } from 'react-native';
 import { BRAND } from '../theme/brand';
+import { ComponentSize, FontFamily, Radius, Spacing, TextRole, Type, HeroOverlay, pagerDotLabel } from '../theme';
 import { CarouselZone } from './chrome/CarouselZone';
+import { HeroImageScrim } from './chrome/HeroImageScrim';
+import { AnimatedPagerDot } from './ui/AnimatedPagerDot';
+import { AccessibleText } from './ui/AccessibleText';
 
 export type IntroHeroSlide = {
   id: string;
@@ -56,6 +58,10 @@ export function IntroHeroCarousel({
   const pauseUntilRef = useRef(0);
   const gap = 12;
   const snap = cardWidth + gap;
+  const hasComingSoon = slides.some((s) => s.comingSoon);
+  // Coming-soon slides carry more chrome (pill + chips) — give them room so text
+  // doesn't climb into the map / top chrome.
+  const resolvedHeight = hasComingSoon ? Math.max(cardHeight, 236) : cardHeight;
 
   const pauseAutoplay = useCallback((ms = USER_PAUSE_MS) => {
     pauseUntilRef.current = Date.now() + ms;
@@ -96,39 +102,55 @@ export function IntroHeroCarousel({
         source={item.image}
         style={[
           styles.card,
-          { width: cardWidth, height: cardHeight, borderColor: darkMode ? BRAND.dark.border : BRAND.light.border },
+          {
+            width: cardWidth,
+            height: resolvedHeight,
+            borderColor: darkMode ? BRAND.dark.border : BRAND.light.border,
+          },
         ]}
         imageStyle={styles.cardImage}
         resizeMode="cover"
+        accessibilityElementsHidden
+        importantForAccessibility="no"
       >
-        <View style={styles.overlay} />
-        <View style={styles.goldWash} />
+        <HeroImageScrim />
         <View style={styles.cardBody}>
-          {item.comingSoon ? (
-            <View style={styles.soonPill}>
-              <Text style={styles.soonPillText}>Coming soon</Text>
-            </View>
-          ) : null}
-          <Text style={styles.eyebrow}>{item.eyebrow}</Text>
-          <Text style={styles.title} numberOfLines={2}>
-            {item.title}
-          </Text>
-          <Text style={styles.desc} numberOfLines={3}>
-            {item.description}
-          </Text>
-          <View style={styles.workRow}>
-            {item.workAreas.slice(0, 3).map((area) => (
-              <View key={area} style={styles.workChip}>
-                <Text style={styles.workChipText} numberOfLines={1}>
-                  {area}
-                </Text>
+          <View
+            style={styles.cardFooter}
+            accessible
+            accessibilityRole="summary"
+            accessibilityLabel={`${item.eyebrow}. ${item.title}. ${item.description}`}
+          >
+            {item.comingSoon ? (
+              <View style={styles.soonPill}>
+                <AccessibleText style={styles.soonPillText}>Coming soon</AccessibleText>
               </View>
-            ))}
+            ) : null}
+            <AccessibleText style={styles.eyebrow} numberOfLines={1}>
+              {item.eyebrow}
+            </AccessibleText>
+            <AccessibleText style={styles.title} numberOfLines={item.comingSoon ? 1 : 2}>
+              {item.title}
+            </AccessibleText>
+            <AccessibleText style={styles.desc} numberOfLines={item.comingSoon ? 2 : 2}>
+              {item.description}
+            </AccessibleText>
+            {item.workAreas.length > 0 ? (
+              <View style={styles.workRow}>
+                {item.workAreas.slice(0, item.comingSoon ? 2 : 3).map((area) => (
+                  <View key={area} style={styles.workChip} accessibilityElementsHidden>
+                    <AccessibleText style={styles.workChipText} numberOfLines={1}>
+                      {area}
+                    </AccessibleText>
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </View>
         </View>
       </ImageBackground>
     ),
-    [cardWidth, cardHeight, darkMode],
+    [cardWidth, resolvedHeight, darkMode],
   );
 
   if (slides.length === 0) return null;
@@ -136,10 +158,12 @@ export function IntroHeroCarousel({
   return (
     <CarouselZone style={styles.wrap}>
       <View style={styles.headerRow}>
-        <Text style={[styles.hint, { color: darkMode ? BRAND.dark.muted : BRAND.light.textMuted }]}>{hint}</Text>
-        <Text style={[styles.counter, { color: darkMode ? BRAND.dark.muted : BRAND.light.textMuted }]}>
+        <AccessibleText style={[styles.hint, { color: darkMode ? BRAND.dark.muted : BRAND.light.textMuted }]}>
+          {hint}
+        </AccessibleText>
+        <AccessibleText style={[styles.counter, { color: darkMode ? BRAND.dark.muted : BRAND.light.textMuted }]}>
           {activeIndex + 1}/{slides.length}
-        </Text>
+        </AccessibleText>
       </View>
       <FlatList
         ref={listRef}
@@ -150,6 +174,9 @@ export function IntroHeroCarousel({
         snapToInterval={snap}
         decelerationRate="fast"
         showsHorizontalScrollIndicator={false}
+        accessibilityRole="list"
+        accessibilityLabel="Feature highlights"
+        accessibilityHint={hint}
         contentContainerStyle={{ paddingRight: gap }}
         onScrollBeginDrag={() => pauseAutoplay()}
         onMomentumScrollEnd={onScrollEnd}
@@ -158,16 +185,17 @@ export function IntroHeroCarousel({
       />
       <View style={styles.dots}>
         {slides.map((slide, i) => (
-          <Pressable
+          <AnimatedPagerDot
             key={slide.id}
+            active={i === activeIndex}
+            activeColor={BRAND.primary}
+            idleColor="rgba(232, 149, 26, 0.28)"
             onPress={() => {
               pauseAutoplay();
               onIndexChange(i);
             }}
-            hitSlop={8}
-          >
-            <View style={[styles.dot, i === activeIndex && styles.dotOn]} />
-          </Pressable>
+            accessibilityLabel={pagerDotLabel(i, slides.length, i === activeIndex)}
+          />
         ))}
       </View>
     </CarouselZone>
@@ -176,114 +204,114 @@ export function IntroHeroCarousel({
 
 const styles = StyleSheet.create({
   wrap: {
-    marginBottom: 14,
+    marginBottom: Spacing[2],
   },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 8,
-    paddingHorizontal: 2,
+    marginBottom: Spacing[1],
+    paddingHorizontal: Spacing[0.5],
   },
   hint: {
-    fontSize: 11,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.overline.fontSize,
+    lineHeight: TextRole.overline.lineHeight,
+    fontFamily: FontFamily.semibold,
     letterSpacing: 0.2,
   },
   counter: {
-    fontSize: 11,
-    fontFamily: 'Inter_500Medium',
+    fontSize: TextRole.overline.fontSize,
+    lineHeight: TextRole.overline.lineHeight,
+    fontFamily: FontFamily.medium,
   },
   card: {
-    borderRadius: 16,
+    borderRadius: ComponentSize.card.radius,
     overflow: 'hidden',
-    marginRight: 12,
+    marginRight: Spacing[1.5],
     borderWidth: StyleSheet.hairlineWidth,
   },
   cardImage: {
-    borderRadius: 16,
-  },
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(8, 7, 5, 0.55)',
-  },
-  goldWash: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(201, 162, 39, 0.12)',
+    borderRadius: ComponentSize.card.radius,
   },
   cardBody: {
     flex: 1,
     justifyContent: 'flex-end',
-    padding: 14,
+    padding: Spacing[1.5],
+  },
+  cardFooter: {
+    maxHeight: '100%',
+    paddingHorizontal: Spacing[1.5],
+    paddingTop: Spacing[1],
+    paddingBottom: Spacing[1.5],
+    borderRadius: Radius.md,
+    backgroundColor: HeroOverlay.panelBg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: HeroOverlay.panelBorder,
+    overflow: 'hidden',
   },
   soonPill: {
     alignSelf: 'flex-start',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    minHeight: 22,
+    paddingHorizontal: Spacing[1],
+    justifyContent: 'center',
     borderRadius: 999,
     backgroundColor: 'rgba(201, 162, 39, 0.28)',
     marginBottom: 6,
   },
   soonPillText: {
-    fontSize: 9,
-    fontFamily: 'Inter_700Bold',
+    fontSize: 10,
+    fontFamily: FontFamily.bold,
     letterSpacing: 0.8,
     color: BRAND.goldSoft,
     textTransform: 'uppercase',
   },
   eyebrow: {
-    fontSize: 10,
-    fontFamily: 'Inter_700Bold',
-    letterSpacing: 1.2,
+    fontSize: TextRole.overline.fontSize,
+    lineHeight: TextRole.overline.lineHeight,
+    fontFamily: FontFamily.bold,
+    letterSpacing: 0.8,
     color: BRAND.gold,
-    marginBottom: 4,
+    marginBottom: 2,
   },
   title: {
-    fontSize: 18,
-    fontFamily: 'Inter_700Bold',
+    fontSize: Type.title3.fontSize,
+    lineHeight: Type.title3.lineHeight,
+    fontFamily: FontFamily.bold,
     color: '#FFFFFF',
-    letterSpacing: -0.3,
-    marginBottom: 4,
+    letterSpacing: -0.2,
+    marginBottom: 2,
   },
   desc: {
-    fontSize: 12,
-    fontFamily: 'Inter_400Regular',
-    lineHeight: 17,
-    color: 'rgba(255,255,255,0.9)',
-    marginBottom: 8,
+    fontSize: TextRole.label.fontSize,
+    fontFamily: FontFamily.regular,
+    lineHeight: TextRole.label.lineHeight,
+    color: 'rgba(255,255,255,0.88)',
+    marginBottom: Spacing[1],
   },
   workRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
+    flexWrap: 'nowrap',
+    gap: Spacing[0.5],
   },
   workChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 6,
+    minHeight: 26,
+    paddingHorizontal: Spacing[1],
+    justifyContent: 'center',
+    borderRadius: Radius.pill,
     backgroundColor: 'rgba(255,255,255,0.14)',
-    maxWidth: '100%',
+    maxWidth: '48%',
   },
   workChipText: {
-    fontSize: 10,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.overline.fontSize,
+    lineHeight: TextRole.overline.lineHeight,
+    fontFamily: FontFamily.semibold,
     color: 'rgba(255,255,255,0.92)',
   },
   dots: {
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 6,
-    marginTop: 10,
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(201, 162, 39, 0.28)',
-  },
-  dotOn: {
-    width: 18,
-    backgroundColor: BRAND.primary,
+    gap: Spacing[1],
+    marginTop: Spacing[1.5],
   },
 });

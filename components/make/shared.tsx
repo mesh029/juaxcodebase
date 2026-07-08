@@ -286,7 +286,7 @@ export const MAKE_TRIPS = {
 };
 
 export const SERVICE_DOT_COLORS = {
-  laundry: '#2563EB',
+  laundry: '#E85A1C',
   stay: '#7C3AED',
   ride: '#10B981',
 } as const;

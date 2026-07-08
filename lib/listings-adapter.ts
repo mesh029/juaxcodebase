@@ -1,16 +1,15 @@
-import type { PublicListing, LaundryStation } from './api-types';
-
-type Coordinates = { latitude: number; longitude: number };
-type CountyKey = 'nairobi' | 'mombasa' | 'kisumu' | 'nyamira';
+import type { BnbBooking, PublicListing, LaundryStation } from './api-types';
+import { COUNTY_CENTER_COORDS } from './listings-distance';
+import { resolveListingCounty, type CountyKey } from './county';
 
 const DEFAULT_IMAGE = {
   uri: 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?w=800&q=80',
 };
 
-function toCounty(raw: string): CountyKey {
-  const c = raw.toLowerCase() as CountyKey;
-  if (c === 'nairobi' || c === 'mombasa' || c === 'kisumu' || c === 'nyamira') return c;
-  return 'kisumu';
+type Coordinates = { latitude: number; longitude: number };
+
+function toCounty(raw: string, coords?: Coordinates): CountyKey {
+  return resolveListingCounty(raw, coords) ?? 'kisumu';
 }
 
 function toCoords(pin: { lat: number; lng: number }): Coordinates {
@@ -85,7 +84,7 @@ export function adaptRentalListing(l: PublicListing): AdaptedHouseListing {
   return {
     id: l.id,
     title: l.title,
-    county: toCounty(l.county),
+    county: toCounty(l.county, toCoords(l.approxPin)),
     coords: toCoords(l.approxPin),
     distanceKm: l.distanceKm ?? 0,
     price: `KES ${l.priceKes.toLocaleString()} / ${l.priceUnit}`,
@@ -105,12 +104,37 @@ export function adaptRentalListing(l: PublicListing): AdaptedHouseListing {
   };
 }
 
+/** Fallback row when a booked stay is not in the current catalog payload. */
+export function adaptBnbListingStubFromBooking(booking: BnbBooking): AdaptedBnbListing {
+  const county = toCounty(booking.listing?.county ?? 'kisumu');
+  return {
+    id: booking.listingId,
+    title: booking.listing?.title ?? 'Your booked stay',
+    county,
+    distanceKm: 0,
+    rating: '4.8',
+    price: 'Booked',
+    image: DEFAULT_IMAGE,
+    gallery: [DEFAULT_IMAGE],
+    detailHighlights: ['Your active reservation'],
+    coords: COUNTY_CENTER_COORDS[county],
+    exploreReason: booking.listing?.neighborhood
+      ? `Booked · ${booking.listing.neighborhood}`
+      : 'Your booked stay',
+    beds: 2,
+    guests: 2,
+    amenities: [],
+    has3dTour: false,
+    locationLocked: true,
+  };
+}
+
 export function adaptBnbListing(l: PublicListing): AdaptedBnbListing {
   const images = (l.imageUrls?.length ? l.imageUrls : l.coverImageUrl ? [l.coverImageUrl] : []).map((u) => ({ uri: u }));
   return {
     id: l.id,
     title: l.title,
-    county: toCounty(l.county),
+    county: toCounty(l.county, toCoords(l.approxPin)),
     distanceKm: l.distanceKm ?? 0,
     rating: '4.8',
     price: `KES ${l.priceKes.toLocaleString()} / ${l.priceUnit}`,
@@ -154,7 +178,7 @@ export function adaptStation(s: LaundryStation): AdaptedPlaceStation {
     id: s.id,
     name: s.name,
     subtitle: s.address,
-    county: toCounty(s.county),
+    county: toCounty(s.county, toCoords(s.pin)),
     coords: toCoords(s.pin),
   };
 }

@@ -1,6 +1,9 @@
 import { ReactNode } from 'react';
-import { Pressable, StyleSheet, Text, View, type ViewStyle } from 'react-native';
+import { Pressable, StyleSheet, View, type ViewStyle } from 'react-native';
 import { BRAND } from '../../theme/brand';
+import { ComponentSize, FontFamily, HapticMap, Radius, Spacing, TextRole, Touch, sheetChrome, A11y } from '../../theme';
+import { PressableScale } from '../ui/PressableScale';
+import { AccessibleText } from '../ui/AccessibleText';
 
 type Props = {
   label: string;
@@ -28,37 +31,49 @@ export function SheetStickyFooter({
   backLabel = 'Back',
   children,
 }: Props) {
-  const border = darkMode ? BRAND.dark.border : BRAND.light.border;
-  const bg = darkMode ? BRAND.dark.sheet : BRAND.light.sheet;
+  const shellChrome = sheetChrome(darkMode);
   const textPrimary = darkMode ? BRAND.dark.text : BRAND.light.text;
   const textSecondary = darkMode ? BRAND.dark.textSecondary : BRAND.light.textSecondary;
   const muted = darkMode ? BRAND.dark.surface : BRAND.light.primaryFaint;
+  const subtleBorder = darkMode ? 'transparent' : BRAND.light.border;
 
   return (
-    <View style={[styles.shell, { borderTopColor: border, backgroundColor: bg }, style]}>
+    <View style={[styles.shell, shellChrome, style]}>
       {sublabel ? (
         <View style={styles.sublabelRow}>
-          <Text style={[styles.sublabel, { color: textSecondary }]}>{sublabel}</Text>
+          <AccessibleText style={[styles.sublabel, { color: textSecondary }]}>{sublabel}</AccessibleText>
         </View>
       ) : null}
       {children}
       {onBack ? (
-        <Pressable onPress={onBack} style={styles.backLink} hitSlop={8}>
-          <Text style={[styles.backLinkText, { color: textSecondary }]}>← {backLabel}</Text>
+        <Pressable
+          onPress={onBack}
+          style={styles.backLink}
+          hitSlop={A11y.hitSlop}
+          accessibilityRole="button"
+          accessibilityLabel={backLabel}
+        >
+          <AccessibleText style={[styles.backLinkText, { color: textSecondary }]}>← {backLabel}</AccessibleText>
         </Pressable>
       ) : null}
-      <Pressable
-        onPress={onPress}
+      <PressableScale
+        accessibilityRole="button"
+        accessibilityLabel={label}
+        accessibilityState={{ disabled: !!disabled }}
+        onPress={() => {
+          if (!disabled) HapticMap.light();
+          onPress();
+        }}
         disabled={disabled}
         style={[
           styles.cta,
           tone === 'primary' && styles.ctaPrimary,
-          tone === 'subtle' && [styles.ctaSubtle, { borderColor: border, backgroundColor: muted }],
+          tone === 'subtle' && [styles.ctaSubtle, { borderColor: subtleBorder, backgroundColor: muted }],
           tone === 'outline' && styles.ctaOutline,
           disabled && styles.ctaDisabled,
         ]}
       >
-        <Text
+        <AccessibleText
           style={[
             styles.ctaText,
             tone === 'primary' && styles.ctaTextPrimary,
@@ -68,8 +83,8 @@ export function SheetStickyFooter({
           ]}
         >
           {label}
-        </Text>
-      </Pressable>
+        </AccessibleText>
+      </PressableScale>
     </View>
   );
 }
@@ -77,10 +92,9 @@ export function SheetStickyFooter({
 const styles = StyleSheet.create({
   shell: {
     flexShrink: 0,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: 16,
-    paddingTop: 6,
-    paddingBottom: 4,
+    paddingHorizontal: Spacing[2],
+    paddingTop: Spacing[1],
+    paddingBottom: Spacing[0.5],
   },
   sublabelRow: {
     flexDirection: 'row',
@@ -89,21 +103,25 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   sublabel: {
-    fontSize: 11,
-    fontFamily: 'Inter_400Regular',
+    fontSize: TextRole.overline.fontSize,
+    lineHeight: TextRole.overline.lineHeight,
+    fontFamily: FontFamily.regular,
   },
   backLink: {
     alignSelf: 'flex-start',
-    paddingVertical: 2,
+    paddingVertical: Spacing[1],
     marginBottom: 4,
+    minHeight: Touch.minSize,
+    justifyContent: 'center',
   },
   backLinkText: {
-    fontSize: 12,
-    fontFamily: 'Inter_500Medium',
+    fontSize: TextRole.label.fontSize,
+    lineHeight: TextRole.label.lineHeight,
+    fontFamily: FontFamily.medium,
   },
   cta: {
-    minHeight: 40,
-    borderRadius: 10,
+    minHeight: ComponentSize.button.md,
+    borderRadius: Radius.sm,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -117,15 +135,16 @@ const styles = StyleSheet.create({
     opacity: 0.45,
   },
   ctaText: {
-    fontSize: 14,
-    fontFamily: 'Inter_600SemiBold',
+    fontSize: TextRole.bodyStrong.fontSize,
+    lineHeight: TextRole.bodyStrong.lineHeight,
+    fontFamily: FontFamily.semibold,
     letterSpacing: 0.1,
   },
   ctaTextPrimary: {
     color: BRAND.primaryText,
   },
   ctaTextSubtle: {
-    fontFamily: 'Inter_500Medium',
+    fontFamily: FontFamily.medium,
   },
   ctaOutline: {
     backgroundColor: 'transparent',

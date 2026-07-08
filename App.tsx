@@ -5,6 +5,7 @@ import { Fragment, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, 
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import {
   ActivityIndicator,
+  AppState,
   BackHandler,
   Dimensions,
   FlatList,
@@ -38,12 +39,18 @@ import { WebView, type WebViewMessageEvent, type WebViewProps } from 'react-nati
 import { useChromeInsets } from './hooks/useChromeInsets';
 import { toSwipeableSegment, useServiceSwipePan, type SwipeableSegment } from './hooks/useServiceSwipe';
 import { ServiceSwipeProvider } from './context/ServiceSwipeContext';
-import { CarouselZone } from './components/chrome/CarouselZone';
+import { AnimatedNotice } from './components/ui/AnimatedNotice';
+import { EmptyState } from './components/ui/EmptyState';
+import { AccessibleText } from './components/ui/AccessibleText';
+import { PressableScale } from './components/ui/PressableScale';
 import { HomeHub } from './components/home/HomeHub';
 import { buildUnifiedHomeServicesMapHtml, type HomeUnifiedBanks, type HomeUnifiedPin } from './homeUnifiedMapHtml';
 import { OnboardingFlow } from './components/onboarding/OnboardingFlow';
 import { BRAND } from './theme/brand';
 import { Colors } from './theme/colors';
+import { DarkElevation } from './theme/shadows';
+import { HapticMap, configureLayoutAnimation, nestedChrome, chipLabel } from './theme';
+import { CarouselZone } from './components/chrome/CarouselZone';
 import { ERServiceSegment, type ServiceSegmentItem } from './components/easyride/ERServiceSegment';
 import { ERTabBar } from './components/easyride/ERTabBar';
 import { ERSearchField } from './components/easyride/ERSearchField';
@@ -59,18 +66,29 @@ import {
 import { MAP_INTERACTION_HTML, MAP_INTERACTION_JS, MAP_INTERACTION_STYLES } from './mapInteractionScript';
 import { useAuth } from './context/AuthContext';
 import { useAppData } from './hooks/useAppData';
-import { createLaundryOrder, estimateLaundryOrder, fetchLaundryOrders, submitFeedback, fetchListingDetail, fetchActiveSubscription, createSubscription, confirmSubscriptionPayment, createBnbBooking, confirmBnbBookingPayment, fetchBnbBookings, fetchMyFeedback, createListingRequest, fetchMyListingRequests, fetchListingRequest, replyToListingRequest } from './lib/api';
+import { createLaundryOrder, estimateLaundryOrder, fetchLaundryOrders, submitFeedback, fetchListingDetail, fetchActiveSubscription, createSubscription, confirmSubscriptionPayment, createBnbBooking, confirmBnbBookingPayment, fetchBnbBookings, createListingRequest, fetchMyListingRequests, fetchListingRequest, replyToListingRequest, getApiBaseUrl, getStoredToken } from './lib/api';
 import {
   isActiveListingRequest,
   LISTING_REQUEST_STATUS_LABELS,
   LISTING_REQUEST_STEPS,
   listingRequestStepIndex,
-  mergeListingRequests,
-  parseListingRequestsFromFeedback,
 } from './lib/listing-requests';
 import { PRODUCTION_TODO } from './lib/production-todos';
-import type { LaundryOrder, ListingRequest, ListingRequestKind, PublicListing, BnbBooking } from './lib/api-types';
-import { mergeListingUnlockFields, adaptBnbListing, type AdaptedBnbListing, type AdaptedHouseListing } from './lib/listings-adapter';
+import type {
+  LaundryOrder,
+  ListingRequest,
+  ListingRequestKind,
+  ListingRequestMessage,
+  PublicListing,
+  BnbBooking,
+} from './lib/api-types';
+import {
+  mergeListingUnlockFields,
+  adaptBnbListing,
+  adaptBnbListingStubFromBooking,
+  type AdaptedBnbListing,
+  type AdaptedHouseListing,
+} from './lib/listings-adapter';
 import { FuaFeedbackCard } from './components/feedback/FuaFeedbackCard';
 import { SubscriptionSheet } from './components/subscription/SubscriptionSheet';
 import { BnbBookingSheet } from './components/booking/BnbBookingSheet';
@@ -78,16 +96,31 @@ import { BookedStaySheet } from './components/booking/BookedStaySheet';
 import { GuidedNavigationModal } from './components/navigation/GuidedNavigationModal';
 import { ListingRequestSheet } from './components/listings/ListingRequestSheet';
 import { ViewingRequestSheet } from './components/listings/ViewingRequestSheet';
+import { ListingLocationActions } from './components/listings/ListingLocationActions';
 import { ListingDistanceBadge, ListingMetaText } from './components/listings/ListingMetaText';
 import { ListingsExplorePanel } from './components/listings/ListingsExplorePanel';
 import {
+  COUNTY_CENTER_COORDS,
   formatListingDistance,
   formatListingDistanceLabel,
   formatListingMetaLine,
+  getDistanceKm,
   getListingDistanceReference,
   hasValidMapCoords,
   NO_DISTANCE_REFERENCE,
 } from './lib/listings-distance';
+import {
+  buildProximityContext,
+  filterByCounty,
+  filterListingsByProximity,
+  mergePinnedProximityRows,
+} from './lib/listings-nearby';
+import {
+  detectCountyFromCoords,
+  normalizeCountyKey,
+  resolveListingsCounty,
+  type CountyKey,
+} from './lib/county';
 import { ProfileEditor } from './components/profile/ProfileEditor';
 
 if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
@@ -124,17 +157,6 @@ type ThemeMode = 'light' | 'dark';
 type ThemePreference = 'system' | 'light' | 'dark';
 type Coordinates = { latitude: number; longitude: number };
 
-function getDistanceKm(from: Coordinates, to: Coordinates): number {
-  const toRadians = (value: number) => (value * Math.PI) / 180;
-  const earthRadiusKm = 6371;
-  const deltaLat = toRadians(to.latitude - from.latitude);
-  const deltaLon = toRadians(to.longitude - from.longitude);
-  const a =
-    Math.sin(deltaLat / 2) ** 2 +
-    Math.cos(toRadians(from.latitude)) * Math.cos(toRadians(to.latitude)) * Math.sin(deltaLon / 2) ** 2;
-  return earthRadiusKm * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
-
 function enrichWithDistanceFromUser<T extends { coords: Coordinates }>(
   rows: T[],
   from: Coordinates | null,
@@ -149,6 +171,97 @@ const ACTIVE_BNB_BOOKING_STATUSES = new Set(['pending_payment', 'confirmed']);
 
 function findActiveBnbBookingForListing(bookings: BnbBooking[], listingId: string): BnbBooking | undefined {
   return bookings.find((b) => b.listingId === listingId && ACTIVE_BNB_BOOKING_STATUSES.has(b.status));
+}
+
+function mergeRequestMessages(
+  existing: ListingRequestMessage[] | undefined,
+  incoming: ListingRequestMessage[] | undefined,
+): ListingRequestMessage[] {
+  const rows = [...(existing ?? []), ...(incoming ?? [])];
+  const seen = new Set<string>();
+  return rows
+    .filter((row) => {
+      if (!row?.id || seen.has(row.id)) return false;
+      seen.add(row.id);
+      return true;
+    })
+    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+}
+
+function mergeListingRequestWithLocalMessages(
+  previous: ListingRequest | null | undefined,
+  incoming: ListingRequest,
+): ListingRequest {
+  if (!previous) return incoming;
+  return {
+    ...previous,
+    ...incoming,
+    messages: mergeRequestMessages(previous.messages, incoming.messages),
+  };
+}
+
+type ActivityFeedKind = 'chat' | 'status';
+type ActivityFeedEntity = 'listing_request' | 'laundry' | 'stay';
+
+type ActivityFeedItem = {
+  id: string;
+  kind: ActivityFeedKind;
+  entity: ActivityFeedEntity;
+  entityId: string;
+  title: string;
+  body: string;
+  timeLabel: string;
+  sortMs: number;
+};
+
+type ActivityViewedSnapshot = {
+  requestMessages: Map<string, string>;
+  requestStatus: Map<string, string>;
+  laundryStatus: Map<string, string>;
+  stayStatus: Map<string, string>;
+};
+
+function emptyActivityViewed(): ActivityViewedSnapshot {
+  return {
+    requestMessages: new Map(),
+    requestStatus: new Map(),
+    laundryStatus: new Map(),
+    stayStatus: new Map(),
+  };
+}
+
+function listingRequestMessageKey(req: ListingRequest): string {
+  const latest = req.messages?.[req.messages.length - 1];
+  return latest ? `${latest.senderRole}:${latest.createdAt}` : '';
+}
+
+function listingRequestActivityTitle(req: ListingRequest): string {
+  if (req.kind === 'tour') return `BnB tour · ${req.listingTitle}`;
+  if (req.kind === 'viewing') return `House viewing · ${req.listingTitle}`;
+  return `Stay · ${req.listingTitle}`;
+}
+
+const LISTING_STUB_IMAGE = {
+  uri: 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?w=800&q=80',
+};
+
+function adaptHouseListingStubFromRequest(req: ListingRequest, county: CountyKey): HouseListing {
+  return {
+    id: req.listingId,
+    title: req.listingTitle,
+    county,
+    coords: COUNTY_CENTER_COORDS[county],
+    distanceKm: 0,
+    price: 'Viewing requested',
+    image: LISTING_STUB_IMAGE,
+    gallery: [LISTING_STUB_IMAGE],
+    detailHighlights: [LISTING_REQUEST_STATUS_LABELS[req.status] ?? 'Requested'],
+    beds: 1,
+    baths: 1,
+    amenities: [],
+    has3dTour: false,
+    locationLocked: true,
+  };
 }
 
 const LISTING_RADIUS_DEFAULT_KM = 5;
@@ -168,7 +281,6 @@ type Suggestion = { id: string; name: string; subtitle: string; coords: Coordina
 type RideOption = { id: string; label: string; minutes: number; multiplier: number; icon: AppIconName; seats: number; blurb: string };
 type ServiceType = 'rides' | 'bnbs' | 'laundry' | 'houses';
 type TripPhase = 'idle' | 'selecting' | 'route_preview' | 'confirmed' | 'active_trip';
-type CountyKey = 'nairobi' | 'mombasa' | 'kisumu' | 'nyamira';
 /** Catalog “Area on the map”: counties, everywhere, or pin-radius (distance cap only applies for `near_me`). */
 type ListingCatalogArea = CountyKey | 'any' | 'near_me';
 type PlaceStation = { id: string; name: string; subtitle: string; county: CountyKey; coords: Coordinates };
@@ -315,6 +427,7 @@ type Theme = {
   canvas: string;
   surface: string;
   sheet: string;
+  elevated: string;
   border: string;
   textPrimary: string;
   textSecondary: string;
@@ -329,6 +442,7 @@ type Theme = {
   grabber: string;
   statusBar: 'light' | 'dark';
   mapStyleId: string;
+  isDark: boolean;
 };
 
 const MAPBOX_ACCESS_TOKEN =
@@ -345,40 +459,6 @@ const SCREEN_HEIGHT = Dimensions.get('window').height;
 const SCREEN_WIDTH = Dimensions.get('window').width;
 const FULL_SECTION_MAP_HEIGHT = Math.max(420, Math.round(SCREEN_HEIGHT * 0.74));
 const HOME_SERVICE_MAP_HEIGHT = Math.max(460, Math.round(SCREEN_HEIGHT * 0.68));
-
-const SUPPORTED_COUNTIES: CountyKey[] = ['nairobi', 'mombasa', 'kisumu', 'nyamira'];
-
-const COUNTY_ALIASES: Record<CountyKey, string[]> = {
-  nairobi: ['nairobi'],
-  mombasa: ['mombasa'],
-  kisumu: ['kisumu'],
-  nyamira: ['nyamira', 'nyamira county', 'keroka', 'manga'],
-};
-
-const detectCountyFromText = (raw: string): CountyKey | null => {
-  const normalized = raw.trim().toLowerCase();
-  if (!normalized) return null;
-  for (const county of SUPPORTED_COUNTIES) {
-    if (COUNTY_ALIASES[county].some((alias) => normalized.includes(alias))) {
-      return county;
-    }
-  }
-  return null;
-};
-
-const detectCountyFromCoords = (coords: Coordinates): CountyKey | null => {
-  const countyCenters: { county: CountyKey; coords: Coordinates; maxKm: number }[] = [
-    { county: 'nairobi', coords: { latitude: -1.2864, longitude: 36.8172 }, maxKm: 60 },
-    { county: 'mombasa', coords: { latitude: -4.0435, longitude: 39.6682 }, maxKm: 70 },
-    { county: 'kisumu', coords: { latitude: -0.0917, longitude: 34.768 }, maxKm: 75 },
-    { county: 'nyamira', coords: { latitude: -0.5669, longitude: 34.9341 }, maxKm: 60 },
-  ];
-  const nearest = countyCenters
-    .map((c) => ({ county: c.county, distance: getDistanceKm(coords, c.coords), maxKm: c.maxKm }))
-    .sort((a, b) => a.distance - b.distance)[0];
-  if (!nearest || nearest.distance > nearest.maxKm) return null;
-  return nearest.county;
-};
 
 const toReadableLocationName = (placeName: string): string => {
   const parts = placeName
@@ -927,6 +1007,7 @@ const LIGHT_THEME: Theme = {
   canvas: Colors.light.canvas,
   surface: Colors.light.surface,
   sheet: Colors.light.sheet,
+  elevated: Colors.light.sheet,
   border: Colors.light.border,
   textPrimary: Colors.light.text,
   textSecondary: Colors.light.textSecondary,
@@ -941,6 +1022,7 @@ const LIGHT_THEME: Theme = {
   grabber: Colors.light.grabber,
   statusBar: Colors.light.statusBar,
   mapStyleId: Colors.light.mapStyleId,
+  isDark: false,
 };
 
 const DARK_THEME: Theme = {
@@ -948,6 +1030,7 @@ const DARK_THEME: Theme = {
   canvas: Colors.dark.canvas,
   surface: Colors.dark.surface,
   sheet: Colors.dark.sheet,
+  elevated: Colors.dark.elevated,
   border: Colors.dark.border,
   textPrimary: Colors.dark.text,
   textSecondary: Colors.dark.textSecondary,
@@ -962,6 +1045,7 @@ const DARK_THEME: Theme = {
   grabber: Colors.dark.grabber,
   statusBar: Colors.dark.statusBar,
   mapStyleId: Colors.dark.mapStyleId,
+  isDark: true,
 };
 
 /** Remote hero shots — section-relevant, cacheable Unsplash URLs. */
@@ -1500,33 +1584,13 @@ const prevFuaWizardStep = (step: FuaWizardStep): FuaWizardStep | null => {
 
 function fuaStepCopy(mode: LaundryPickupMode, step: FuaWizardStep): { title: string; subtitle: string } {
   if (mode === 'mamafua') {
-    if (step === 'pickup') {
-      return {
-        title: 'Your home',
-        subtitle: 'A rider drops off Mama Fua with bucket, mop & supplies — she works at your place',
-      };
-    }
-    if (step === 'load') {
-      return {
-        title: 'What should they do?',
-        subtitle: 'Tick the jobs you need — floors, utensils, laundry, deep clean, etc.',
-      };
-    }
-    return {
-      title: 'Confirm visit',
-      subtitle: 'Rider + Mama Fua head to your address at the time you picked',
-    };
+    if (step === 'pickup') return { title: 'Mama Fua', subtitle: 'Cleaner comes to you' };
+    if (step === 'load') return { title: 'What do you need?', subtitle: 'Tap the jobs you want' };
+    return { title: 'Ready to book', subtitle: 'Confirm and we’ll send Mama Fua' };
   }
-  if (step === 'pickup') {
-    return {
-      title: 'Wash & fold',
-      subtitle: 'Door pickup by default — or pick a drop-off hub on the map',
-    };
-  }
-  const meta = FUA_WIZARD_BOOKING.find((s) => s.key === step);
-  return meta
-    ? { title: meta.title, subtitle: meta.subtitle }
-    : { title: 'Review', subtitle: 'Check details before we dispatch' };
+  if (step === 'pickup') return { title: 'Laundry', subtitle: 'We pick up from your door' };
+  if (step === 'load') return { title: 'How much?', subtitle: 'Guess is fine — we confirm later' };
+  return { title: 'Almost done', subtitle: 'Check and send your request' };
 }
 
 function scheduleBandLabel(
@@ -1625,86 +1689,131 @@ const SERVICE_SEGMENTS: ServiceSegmentItem<ServiceSegmentId>[] = [
   { key: 'groceries', label: 'GROCERY', comingSoon: true },
 ];
 
+type HomeHeaderSegmentKey = 'home' | 'laundry' | 'bnbs' | 'rides' | 'more';
+
+const HOME_MORE_SEGMENT_IDS: ServiceSegmentId[] = [
+  'movers',
+  'tours',
+  'spots',
+  'events',
+  'cloth_shop',
+  'groceries',
+];
+
+const HOME_HEADER_SEGMENTS: ServiceSegmentItem<HomeHeaderSegmentKey>[] = [
+  { key: 'home', label: 'Home' },
+  { key: 'laundry', label: 'Fua' },
+  { key: 'bnbs', label: 'Keja' },
+  { key: 'rides', label: 'Rides', comingSoon: true },
+  { key: 'more', label: 'More', suffixIcon: 'chevron-down' },
+];
+
+const MORE_SERVICE_MENU_SEGMENTS = SERVICE_SEGMENTS.filter((seg) =>
+  (HOME_MORE_SEGMENT_IDS as readonly string[]).includes(seg.key),
+);
+
 const COMING_SOON_SERVICE_INFO: Record<
   ComingSoonServiceId,
-  { eyebrow: string; title: string; lead: string; features: string[]; hero: keyof typeof IMG }
+  {
+    eyebrow: string;
+    title: string;
+    lead: string;
+    features: string[];
+    hero: keyof typeof IMG;
+    icon: AppIconName;
+    tint: string;
+  }
 > = {
   rides: {
     eyebrow: 'RIDES',
     title: 'Jua Rides',
-    lead: 'City rides with upfront KES pricing, pickup at your pin or a hub, and M-Pesa when we launch.',
+    lead: 'Upfront KES fares, pickup at your pin or a hub, M-Pesa when we launch.',
     features: [
-      'Economy, comfort, and XL tiers for everyday trips',
-      'Pickup at your location or a verified hub',
-      'M-Pesa pay · trip history in Trips & orders',
+      'Economy, comfort, and XL tiers',
+      'Pickup at your pin or a hub',
+      'M-Pesa · trip history in Activity',
     ],
     hero: 'ridesHero',
+    icon: 'rides',
+    tint: '#8B5CF6',
   },
   movers: {
     eyebrow: 'MOVERS',
     title: 'Jua Movers',
-    lead: 'Moving to a new place without the chaos — we pack carefully, transport your belongings, and help you settle in.',
+    lead: 'Pack, move, and settle in — local or inter-county without the chaos.',
     features: [
-      'Professional packing & labelling for fragile items',
-      'Van or truck crew for local & inter-county moves',
-      'Unpacking, basic setup & handover at your new home',
+      'Packing & labelling for fragile items',
+      'Van or truck crew for local moves',
+      'Unpacking & handover at your new place',
     ],
     hero: 'moversHero',
+    icon: 'movers',
+    tint: '#3B82F6',
   },
   cloth_shop: {
     eyebrow: 'CLOTH',
     title: 'Jua Cloth',
-    lead: 'Fashion and essentials from local vendors — mitumba finds, market stalls, and trusted tailors in one tap.',
+    lead: 'Mitumba finds, market stalls, and trusted tailors — near you.',
     features: [
-      'Browse curated sellers near your pin',
-      'Mitumba, new arrivals, and custom tailor orders',
-      'Pay with M-Pesa · pickup or doorstep delivery',
+      'Curated sellers near your pin',
+      'Mitumba, new arrivals, custom orders',
+      'M-Pesa · pickup or doorstep delivery',
     ],
     hero: 'clothHero',
+    icon: 'cloth',
+    tint: '#EC4899',
   },
   groceries: {
     eyebrow: 'GROCERY',
     title: 'Jua Grocery',
-    lead: 'Market runs without the queue — dukas, greens, and household staples brought to your door.',
+    lead: 'Dukas, greens, and staples to your door — skip the queue.',
     features: [
-      'Fresh produce and pantry items from nearby shops',
-      'Build a list or reorder your usual basket',
-      'Bundle with a Fua pickup or ride home',
+      'Fresh produce from nearby shops',
+      'Build a list or reorder your usuals',
+      'Bundle with Fua or a ride home',
     ],
     hero: 'groceryHero',
+    icon: 'grocery',
+    tint: '#22C55E',
   },
   tours: {
     eyebrow: 'TOURS',
     title: 'Jua Tours',
-    lead: 'Request guided city tours — culture, food, nightlife, and hidden gems with a local host.',
+    lead: 'Guided city tours — culture, food, nightlife, and hidden gems.',
     features: [
-      'Half-day & full-day itineraries around your city',
-      'Fixed routes or custom requests (markets, museums, coast)',
-      'Pay per person · M-Pesa · group-friendly',
+      'Half-day & full-day itineraries',
+      'Fixed routes or custom requests',
+      'Pay per person · M-Pesa · groups OK',
     ],
     hero: 'toursHero',
+    icon: 'tours',
+    tint: '#F59E0B',
   },
   spots: {
     eyebrow: 'SPOTS',
     title: 'Jua Spots',
-    lead: 'The best places in town — hotels, rooftops, cafés, and photo-worthy corners picked for you.',
+    lead: 'Hotels, rooftops, cafés, and photo corners — picked for you.',
     features: [
-      'Editor picks by neighbourhood and mood',
-      'Hotels, brunch, date night, and family-friendly',
-      'Save favourites · share · book a ride there',
+      'Editor picks by neighbourhood',
+      'Brunch, date night, family-friendly',
+      'Save · share · book a ride there',
     ],
     hero: 'spotsHero',
+    icon: 'spots',
+    tint: '#14B8A6',
   },
   events: {
     eyebrow: 'EVENTS',
     title: 'Jua Events',
-    lead: 'What’s on this week — concerts, markets, meetups, and county showcases in one feed.',
+    lead: 'Concerts, markets, meetups, and showcases near your pin.',
     features: [
-      'Upcoming events near your pin',
-      'Free & ticketed · reminders before sell-out',
+      'What’s on this week near you',
+      'Free & ticketed · sell-out reminders',
       'Get there with Jua Rides in one tap',
     ],
     hero: 'eventsHero',
+    icon: 'events',
+    tint: '#EF4444',
   },
 };
 
@@ -1838,8 +1947,8 @@ const HOME_HERO_SLIDES: IntroHeroSlide[] = [
   {
     id: 'home-welcome',
     eyebrow: 'JUA X',
-    title: 'Everything nearby, one app',
-    description: 'Laundry, stays, and rides from your pin — track it all under Trips.',
+    title: 'Everything around you, one app.',
+    description: 'Laundry, homes, transport, and marketplace — all in one place.',
     image: IMG.lake,
     workAreas: ['Fua', 'Keja', 'Rides'],
   },
@@ -1857,16 +1966,16 @@ const comingSoonHeroSlides = (seg: ComingSoonServiceId): IntroHeroSlide[] => {
       title: info.title,
       description: info.lead,
       image: IMG[info.hero],
-      workAreas: info.features.slice(0, 3),
+      workAreas: info.features.slice(0, 2).map((f) => f.split(' · ')[0].slice(0, 22)),
       comingSoon: true,
     },
     {
       id: `${seg}-soon`,
       eyebrow: 'ON THE WAY',
       title: 'Launching on Jua X',
-      description: 'We are piloting Fua and Saka Keja first — more services join the same app and wallet.',
+      description: 'Fua and Keja first — more services join the same app and wallet.',
       image: IMG.nairobiCity,
-      workAreas: ['Same account', 'M-Pesa ready', 'Notify at launch'],
+      workAreas: ['Same account', 'M-Pesa ready'],
       comingSoon: true,
     },
   ];
@@ -2286,10 +2395,14 @@ export default function App() {
     listingsError,
     refreshAppData,
     refreshAllListingsCatalog,
+    refreshListingsCatalog,
+    refreshNearbyListings,
   } = useAppData();
   const [activeTab, setActiveTab] = useState<MainTab>('home');
   const [activeService, setActiveService] = useState<ServiceType>('laundry');
+  const [homeHubCarouselActive, setHomeHubCarouselActive] = useState(false);
   const [activeSegment, setActiveSegment] = useState<ServiceSegmentId>('home');
+  const [moreServicesOpen, setMoreServicesOpen] = useState(false);
   const [staysSubTab, setStaysSubTab] = useState<StaysSubTab>('bnb');
   const [staysRadiusKm, setStaysRadiusKm] = useState<(typeof STAYS_RADIUS_OPTIONS)[number]>(5);
   const [rentalSubscriptionActive, setRentalSubscriptionActive] = useState(false);
@@ -2307,6 +2420,7 @@ export default function App() {
   const listingsPageLoading = listingsInitialLoading;
   const [listingDetailLive, setListingDetailLive] = useState<PublicListing | null>(null);
   const [bnbBookings, setBnbBookings] = useState<BnbBooking[]>([]);
+  const [bookedListingSnapshots, setBookedListingSnapshots] = useState<Record<string, AdaptedBnbListing>>({});
   const [profileEditOpen, setProfileEditOpen] = useState(false);
   const [themePreference, setThemePreference] = useState<ThemePreference>('system');
   const systemColorScheme = useColorScheme();
@@ -2342,6 +2456,8 @@ export default function App() {
   /** null = door-to-door at your address; otherwise pickup & return at that station */
   const [laundryStationId, setLaundryStationId] = useState<string | null>(null);
   const [laundryPickupMode, setLaundryPickupMode] = useState<LaundryPickupMode>('door');
+  const [fuaShowHubs, setFuaShowHubs] = useState(false);
+  const [activitySection, setActivitySection] = useState<'active' | 'updates' | 'history'>('active');
   const [selectedMamaFuaTasks, setSelectedMamaFuaTasks] = useState<string[]>([]);
   const [serverLaundryEstimate, setServerLaundryEstimate] = useState<number | null>(null);
   const [laundryOrders, setLaundryOrders] = useState<LaundryOrder[]>([]);
@@ -2405,6 +2521,15 @@ export default function App() {
   const [listingDetail, setListingDetail] = useState<{ kind: ListingCatalog; id: string } | null>(null);
   const [listingCatalog, setListingCatalog] = useState<ListingCatalog>('bnb');
   const [listingsViewMode, setListingsViewMode] = useState<'list' | 'map'>('list');
+  const [listingsFiltersCollapsed, setListingsFiltersCollapsed] = useState(false);
+  const listingsFiltersCollapsedRef = useRef(false);
+  const setListingsFiltersCollapsedAnimated = useCallback((collapsed: boolean) => {
+    if (collapsed !== listingsFiltersCollapsedRef.current) {
+      configureLayoutAnimation('filter');
+      listingsFiltersCollapsedRef.current = collapsed;
+    }
+    setListingsFiltersCollapsed(collapsed);
+  }, []);
   const [listingsMapSelectedId, setListingsMapSelectedId] = useState<string | null>(null);
   const [staysSheetViewMode, setStaysSheetViewMode] = useState<'list' | 'map'>('list');
   const [listingCounty, setListingCounty] = useState<ListingCatalogArea>('near_me');
@@ -2417,10 +2542,53 @@ export default function App() {
   const [ridePlannerMeetAssist, setRidePlannerMeetAssist] = useState(false);
   const [ridePickupMode, setRidePickupMode] = useState<'current' | 'station'>('current');
   const [ridePickupStationId, setRidePickupStationId] = useState<string | null>(null);
+  const [activityBellCount, setActivityBellCount] = useState(0);
+  const [activityChatCount, setActivityChatCount] = useState(0);
+  const [activitySocketConnected, setActivitySocketConnected] = useState(false);
   /** Which rides pin type was last tapped on the service map (pickup step). */
   const [serviceMapRidePinFocus, setServiceMapRidePinFocus] = useState<'hub' | 'destination' | null>(null);
   const [rideWizardStep, setRideWizardStep] = useState<RideWizardStep>('pickup');
   const [laundryWizardStep, setLaundryWizardStep] = useState<FuaWizardStep>('pickup');
+  const activeListingRequestsByListingId = useMemo(() => {
+    const sorted = [...listingRequests].sort(
+      (a, b) =>
+        new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime(),
+    );
+    const map = new Map<string, ListingRequest>();
+    for (const req of sorted) {
+      if (!isActiveListingRequest(req.status)) continue;
+      if (!map.has(req.listingId)) map.set(req.listingId, req);
+    }
+    return map;
+  }, [listingRequests]);
+  const pinnedBnbListingIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const booking of bnbBookings) {
+      if (ACTIVE_BNB_BOOKING_STATUSES.has(booking.status)) ids.add(booking.listingId);
+    }
+    for (const request of listingRequests) {
+      if (request.service === 'bnb' && isActiveListingRequest(request.status)) ids.add(request.listingId);
+    }
+    return ids;
+  }, [bnbBookings, listingRequests]);
+  const pinnedHouseListingIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const request of listingRequests) {
+      if (request.service === 'rental' && isActiveListingRequest(request.status)) ids.add(request.listingId);
+    }
+    return ids;
+  }, [listingRequests]);
+  const activityTabBadgeCount = useMemo(
+    () => Math.max(0, activityBellCount + activityChatCount),
+    [activityBellCount, activityChatCount],
+  );
+  const mainTabConfig = useMemo(
+    () =>
+      MAIN_TAB_CONFIG.map((tab) =>
+        tab.key === 'activity' ? { ...tab, badgeCount: activityTabBadgeCount } : tab,
+      ),
+    [activityTabBadgeCount],
+  );
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const theme = themeMode === 'light' ? LIGHT_THEME : DARK_THEME;
   const { insets, bottomInset } = useChromeInsets({
@@ -2429,24 +2597,31 @@ export default function App() {
   });
 
   /** County from GPS or profile — never defaults to Kisumu for display/filtering. */
-  const listingsCounty = useMemo((): CountyKey | null => {
-    if (currentCoords) {
-      const detected = detectCountyFromCoords(currentCoords);
-      if (detected) return detected;
-    }
-    const fromProfile = profile?.county ? detectCountyFromText(profile.county) : null;
-    return fromProfile;
-  }, [currentCoords, profile?.county]);
+  const listingsCounty = useMemo(
+    (): CountyKey | null => resolveListingsCounty(currentCoords, profile?.county, currentCounty),
+    [currentCoords, profile?.county, currentCounty],
+  );
 
   const countyDisplayLabel = listingsCounty
     ? `${listingsCounty.charAt(0).toUpperCase()}${listingsCounty.slice(1)}`
     : locationLoading
-      ? 'Locating your area…'
-      : 'Area unknown';
+      ? 'Locating…'
+      : 'Your area';
+
+  /** Prefer a short place name from GPS reverse-geocode when it matches the county. */
+  const listingCountyChipLabel = useMemo(() => {
+    if (!listingsCounty) return undefined;
+    const countyNice = `${listingsCounty.charAt(0).toUpperCase()}${listingsCounty.slice(1)}`;
+    const raw = currentLocationLabel.trim();
+    if (!raw || /locating/i.test(raw)) return countyNice;
+    const firstPart = raw.split(',')[0]?.trim() ?? raw;
+    if (firstPart.length > 2 && firstPart.length <= 28) return firstPart;
+    return countyNice;
+  }, [listingsCounty, currentLocationLabel]);
 
   const listingAreaChips = useMemo((): ListingCatalogArea[] => {
     if (!listingsCounty) return ['near_me', 'any'];
-    return ['near_me', 'any', listingsCounty];
+    return ['near_me', listingsCounty, 'any'];
   }, [listingsCounty]);
 
   const prevGpsCountyRef = useRef<CountyKey | null>(listingsCounty);
@@ -2456,6 +2631,82 @@ export default function App() {
     () => getListingDistanceReference(currentCoords, listingsCounty) ?? NO_DISTANCE_REFERENCE,
     [currentCoords, listingsCounty],
   );
+
+  const staysProximityCtx = useMemo(
+    () =>
+      buildProximityContext(
+        currentCoords,
+        listingDistanceRef.coords,
+        listingDistanceRef.isApproximate,
+        staysRadiusKm,
+        listingsCounty,
+      ),
+    [currentCoords, listingDistanceRef, staysRadiusKm, listingsCounty],
+  );
+
+  const catalogProximityCtx = useMemo(
+    () =>
+      buildProximityContext(
+        currentCoords,
+        listingDistanceRef.coords,
+        listingDistanceRef.isApproximate,
+        listingRadiusKm,
+        listingsCounty,
+      ),
+    [currentCoords, listingDistanceRef, listingRadiusKm, listingsCounty],
+  );
+
+  const effectiveBnbListings = useMemo((): BnbListing[] => {
+    const merged = new Map<string, BnbListing>(
+      bnbListings.map((listing) => [listing.id, listing as BnbListing]),
+    );
+    for (const booking of bnbBookings) {
+      if (!ACTIVE_BNB_BOOKING_STATUSES.has(booking.status)) continue;
+      if (merged.has(booking.listingId)) continue;
+      merged.set(
+        booking.listingId,
+        (bookedListingSnapshots[booking.listingId] ??
+          adaptBnbListingStubFromBooking(booking)) as BnbListing,
+      );
+    }
+    for (const req of listingRequests) {
+      if (req.service !== 'bnb' || !isActiveListingRequest(req.status)) continue;
+      if (merged.has(req.listingId)) continue;
+      const county = listingsCounty;
+      if (!county) continue;
+      merged.set(req.listingId, {
+        id: req.listingId,
+        title: req.listingTitle,
+        county,
+        coords: COUNTY_CENTER_COORDS[county],
+        rating: '4.8',
+        price: 'Requested',
+        image: LISTING_STUB_IMAGE,
+        gallery: [LISTING_STUB_IMAGE],
+        detailHighlights: [LISTING_REQUEST_STATUS_LABELS[req.status] ?? 'Requested'],
+        exploreReason: 'Listing request in progress',
+        beds: 2,
+        guests: 2,
+        amenities: [],
+        has3dTour: false,
+        locationLocked: true,
+      });
+    }
+    return Array.from(merged.values());
+  }, [bnbListings, bnbBookings, bookedListingSnapshots, listingRequests, listingsCounty]);
+
+  const effectiveHouseListings = useMemo((): HouseListing[] => {
+    const merged = new Map<string, HouseListing>(
+      houseListings.map((listing) => [listing.id, listing as HouseListing]),
+    );
+    for (const req of listingRequests) {
+      if (req.service !== 'rental' || !isActiveListingRequest(req.status)) continue;
+      if (merged.has(req.listingId)) continue;
+      if (!listingsCounty) continue;
+      merged.set(req.listingId, adaptHouseListingStubFromRequest(req, listingsCounty));
+    }
+    return Array.from(merged.values());
+  }, [houseListings, listingRequests, listingsCounty]);
 
   const pickupDisplayLabel = useMemo(() => {
     if (!draftPickupCoords) return currentLocationLabel;
@@ -2505,6 +2756,16 @@ export default function App() {
   }, [onHomeTab, sheetSnap, destinationSearchOpen, windowHeight, isActiveTripMode]);
 
   const showServiceSegment = onHomeTab && sheetSnap !== 'full' && !destinationSearchOpen;
+  const headerSegmentActive = useMemo((): HomeHeaderSegmentKey => {
+    if ((HOME_MORE_SEGMENT_IDS as readonly string[]).includes(activeSegment)) return 'more';
+    if (activeSegment === 'laundry' || activeSegment === 'bnbs' || activeSegment === 'rides') return activeSegment;
+    return 'home';
+  }, [activeSegment]);
+  const homeLocationLine = locationLoading
+    ? 'Locating…'
+    : countyDisplayLabel && countyDisplayLabel !== 'Area unknown' && countyDisplayLabel !== 'Locating your area…'
+      ? `${currentLocationLabel}, ${countyDisplayLabel}`
+      : currentLocationLabel;
   const showDragHandle = onHomeTab && !destinationSearchOpen;
   const showMapBand = mapBandHeight > 0;
   const showMapSheetRadius = showMapBand;
@@ -2525,26 +2786,24 @@ export default function App() {
 
   const sheetHeight = useMemo(() => {
     // Legacy estimate for map camera padding / recenter chip only — not used to clip the sheet.
-    const chromeBelowMap = (showServiceSegment ? 52 : 0) + tabBarTotalHeight;
+    const chromeBelowMap = (showServiceSegment ? 88 : 0) + tabBarTotalHeight;
     return Math.max(200, windowHeight - mapBandHeight - chromeBelowMap);
   }, [mapBandHeight, showServiceSegment, tabBarTotalHeight, windowHeight]);
-  const serviceSegmentHeight = showServiceSegment ? 52 : 0;
+  const serviceSegmentHeight = showServiceSegment ? 88 : 0;
   const bottomChromeHeight = sheetHeight + tabBarTotalHeight + serviceSegmentHeight;
   const showMainTabBar = isAuthed && guidedJourney === null && homeDeepPage === null;
 
   /** Mapbox padding so framing centers in the visible map band (below header/search, above sheet or dock+nav). */
   const homeMapCameraPad = useMemo((): MapViewportPad => {
-    const topChrome = insets.top + 56;
+    const topChrome = insets.top + (showServiceSegment ? 96 : 56);
     const top = Math.round(Math.min(windowHeight * 0.22, Math.max(88, topChrome)));
     const bottom = Math.round(Math.min(windowHeight * 0.72, Math.max(120, bottomChromeHeight + 12)));
     const side = Math.round(Math.max(10, Math.min(28, gutter + 4)));
     return { top, bottom, left: side, right: side };
-  }, [insets.top, gutter, bottomChromeHeight, windowHeight]);
+  }, [insets.top, gutter, bottomChromeHeight, windowHeight, showServiceSegment]);
 
   const setHomeSheetStageAnimated = useCallback((next: HomeSheetStage) => {
-    LayoutAnimation.configureNext(
-      LayoutAnimation.create(320, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity),
-    );
+    configureLayoutAnimation('sheet');
     setHomeSheetStage(next);
   }, []);
 
@@ -2596,9 +2855,7 @@ export default function App() {
 
   const changeServiceBySwipe = useCallback(
     (segment: SwipeableSegment) => {
-      LayoutAnimation.configureNext(
-        LayoutAnimation.create(260, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity),
-      );
+      configureLayoutAnimation('segment');
       setActiveSegment(segment);
       if (segment !== 'home') {
         setActiveService(segment);
@@ -2609,15 +2866,13 @@ export default function App() {
   );
 
   const serviceSwipePan = useServiceSwipePan({
-    enabled: activeTab === 'home' && !destinationSearchOpen && homeDeepPage === null,
+    enabled: activeTab === 'home' && !destinationSearchOpen && homeDeepPage === null && !homeHubCarouselActive,
     active: toSwipeableSegment(activeSegment),
     onChange: changeServiceBySwipe,
   });
 
   const setExploreSheetStageAnimated = useCallback((next: HomeSheetStage) => {
-    LayoutAnimation.configureNext(
-      LayoutAnimation.create(320, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity),
-    );
+    configureLayoutAnimation('sheet');
     setExploreSheetStage(next);
   }, []);
 
@@ -2875,56 +3130,38 @@ export default function App() {
       (station) => getDistanceKm(currentCoords, station.coords) <= PICKUP_RADIUS_KM,
     );
   }, [currentCoords, currentCounty, pickupStations]);
-  const mapBnbs = bnbListings;
-  const mapHouses = houseListings;
+  const mapBnbs = effectiveBnbListings;
+  const mapHouses = effectiveHouseListings;
+  // Legacy/request stubs can carry approximate fallback coords; exclude them from strict "near me" surfaces.
+  const proximityBnbs = useMemo(
+    () => mapBnbs.filter((row) => row.price !== 'Requested'),
+    [mapBnbs],
+  );
+  const proximityHouses = useMemo(
+    () => mapHouses.filter((row) => row.price !== 'Requested'),
+    [mapHouses],
+  );
   const nearbyHouses = useMemo(() => {
-    return mapHouses.filter((house) => {
-      if (currentCoords) {
-        return getDistanceKm(currentCoords, house.coords) <= staysRadiusKm;
-      }
-      if (listingsCounty) {
-        return house.county === listingsCounty;
-      }
-      return true;
-    });
-  }, [mapHouses, currentCoords, staysRadiusKm, listingsCounty]);
+    return filterListingsByProximity(proximityHouses, staysProximityCtx).map((row) => ({
+      ...row,
+      distanceFromUser: row.distanceKm,
+    }));
+  }, [proximityHouses, staysProximityCtx]);
   const nearbyBnbs = useMemo(() => {
-    return mapBnbs.filter((bnb) => {
-      if (currentCoords) {
-        return getDistanceKm(currentCoords, bnb.coords) <= staysRadiusKm;
-      }
-      if (listingsCounty) {
-        return bnb.county === listingsCounty;
-      }
-      return true;
-    });
-  }, [mapBnbs, currentCoords, staysRadiusKm, listingsCounty]);
+    return filterListingsByProximity(proximityBnbs, staysProximityCtx).map((row) => ({
+      ...row,
+      distanceFromUser: row.distanceKm,
+    }));
+  }, [proximityBnbs, staysProximityCtx]);
   const featuredBnbs = useMemo(() => nearbyBnbs.slice(0, FEATURED_STAYS_HOME), [nearbyBnbs]);
   const featuredHouses = useMemo(() => nearbyHouses.slice(0, FEATURED_STAYS_HOME), [nearbyHouses]);
   /** Home hub — nearest listings from GPS or county center when location is off. */
   const hubListingPool = useMemo(() => {
-    const ref = listingDistanceRef.coords;
-    const countyMatch = <T extends { county: string }>(items: T[]) =>
-      listingsCounty ? items.filter((item) => item.county === listingsCounty) : items;
-    const pool = currentCoords
-      ? { houses: houseListings, bnbs: bnbListings }
-      : {
-          houses: countyMatch(houseListings),
-          bnbs: countyMatch(bnbListings),
-        };
-    const sortNear = <T extends { coords: Coordinates }>(items: T[]) =>
-      [...items]
-        .filter((item) => hasValidMapCoords(item.coords))
-        .sort((a, b) => getDistanceKm(ref, a.coords) - getDistanceKm(ref, b.coords));
-    const withinRadius = <T extends { coords: Coordinates }>(items: T[]) =>
-      currentCoords
-        ? items.filter((item) => getDistanceKm(ref, item.coords) <= staysRadiusKm)
-        : items.slice(0, 12);
     return {
-      houses: withinRadius(sortNear(pool.houses)),
-      bnbs: withinRadius(sortNear(pool.bnbs)),
+      houses: filterListingsByProximity(proximityHouses, staysProximityCtx),
+      bnbs: filterListingsByProximity(proximityBnbs, staysProximityCtx),
     };
-  }, [houseListings, bnbListings, listingsCounty, listingDistanceRef.coords, currentCoords, staysRadiusKm]);
+  }, [proximityHouses, proximityBnbs, staysProximityCtx]);
   const hubPopularListings = useMemo(() => {
     const rows: { id: string; kind: 'bnb' | 'rental'; title: string; subtitle: string; image: { uri: string } }[] =
       [];
@@ -2955,61 +3192,61 @@ export default function App() {
     return rows;
   }, [hubListingPool, listingDistanceRef]);
   const catalogBnbs = useMemo(() => {
-    let rows = enrichWithDistanceFromUser(bnbListings, listingDistanceRef.coords);
-    if (listingCounty === 'near_me') {
-      const ref = listingDistanceRef.coords;
-      const withinRadius = rows.filter((b) => {
-        if (!hasValidMapCoords(b.coords)) return false;
-        return getDistanceKm(ref, b.coords) <= listingRadiusKm;
-      });
-      if (!currentCoords) {
-        rows = withinRadius.filter((b) => !listingsCounty || b.county === listingsCounty);
-      } else if (withinRadius.length > 0) {
-        rows = withinRadius;
-      } else if (listingsCounty) {
-        rows = rows.filter((b) => b.county === listingsCounty);
-      } else {
-        rows = withinRadius;
-      }
-    } else if (listingCounty !== 'any') {
-      rows = rows.filter((b) => b.county === listingCounty);
+    if (listingCounty === 'near_me' && currentCoords) {
+      return filterListingsByProximity(proximityBnbs, catalogProximityCtx, pinnedBnbListingIds).map(
+        (row) => ({
+          ...row,
+          distanceFromUser: row.distanceKm ?? getDistanceKm(currentCoords, row.coords),
+        }),
+      );
     }
-    rows.sort((a, b) => {
-      if (a.distanceFromUser != null && b.distanceFromUser != null) {
-        return a.distanceFromUser - b.distanceFromUser;
-      }
-      return 0;
-    });
-    return rows;
-  }, [listingCounty, currentCoords, listingRadiusKm, bnbListings, listingDistanceRef.coords, listingsCounty]);
+    if (listingCounty === 'near_me') {
+      return filterListingsByProximity(mapBnbs, catalogProximityCtx, pinnedBnbListingIds).map((row) => ({
+        ...row,
+        distanceFromUser: row.distanceKm,
+      }));
+    }
+    const base =
+      listingCounty === 'any' ? mapBnbs : filterByCounty(mapBnbs, listingCounty as CountyKey);
+    return enrichWithDistanceFromUser(base, listingDistanceRef.coords);
+  }, [
+    listingCounty,
+    currentCoords,
+    mapBnbs,
+    proximityBnbs,
+    catalogProximityCtx,
+    pinnedBnbListingIds,
+    listingDistanceRef.coords,
+  ]);
   const catalogHouses = useMemo(() => {
-    let rows = enrichWithDistanceFromUser(houseListings, listingDistanceRef.coords);
-    if (listingCounty === 'near_me') {
-      const ref = listingDistanceRef.coords;
-      const withinRadius = rows.filter((h) => {
-        if (!hasValidMapCoords(h.coords)) return false;
-        return getDistanceKm(ref, h.coords) <= listingRadiusKm;
-      });
-      if (!currentCoords) {
-        rows = withinRadius.filter((h) => !listingsCounty || h.county === listingsCounty);
-      } else if (withinRadius.length > 0) {
-        rows = withinRadius;
-      } else if (listingsCounty) {
-        rows = rows.filter((h) => h.county === listingsCounty);
-      } else {
-        rows = withinRadius;
-      }
-    } else if (listingCounty !== 'any') {
-      rows = rows.filter((h) => h.county === listingCounty);
+    if (listingCounty === 'near_me' && currentCoords) {
+      return filterListingsByProximity(
+        proximityHouses,
+        catalogProximityCtx,
+        pinnedHouseListingIds,
+      ).map((row) => ({
+        ...row,
+        distanceFromUser: row.distanceKm ?? getDistanceKm(currentCoords, row.coords),
+      }));
     }
-    rows.sort((a, b) => {
-      if (a.distanceFromUser != null && b.distanceFromUser != null) {
-        return a.distanceFromUser - b.distanceFromUser;
-      }
-      return 0;
-    });
-    return rows;
-  }, [listingCounty, listingRadiusKm, currentCoords, houseListings, listingDistanceRef.coords, listingsCounty]);
+    if (listingCounty === 'near_me') {
+      return filterListingsByProximity(mapHouses, catalogProximityCtx, pinnedHouseListingIds).map((row) => ({
+        ...row,
+        distanceFromUser: row.distanceKm,
+      }));
+    }
+    const base =
+      listingCounty === 'any' ? mapHouses : filterByCounty(mapHouses, listingCounty as CountyKey);
+    return enrichWithDistanceFromUser(base, listingDistanceRef.coords);
+  }, [
+    listingCounty,
+    currentCoords,
+    mapHouses,
+    proximityHouses,
+    catalogProximityCtx,
+    pinnedHouseListingIds,
+    listingDistanceRef.coords,
+  ]);
   const listingsMapHighlight = useMemo(() => {
     if (!listingsMapSelectedId) return null;
     if (listingCatalog === 'bnb') {
@@ -3023,16 +3260,19 @@ export default function App() {
     if (!listingDetail) return null;
     let base: BnbListing | HouseListing | null = null;
     if (listingDetail.kind === 'bnb') {
-      base = bnbListings.find((b) => b.id === listingDetail.id) ?? null;
+      base =
+        mapBnbs.find((b) => b.id === listingDetail.id) ??
+        bookedListingSnapshots[listingDetail.id] ??
+        null;
     } else {
-      base = houseListings.find((h) => h.id === listingDetail.id) ?? null;
+      base = mapHouses.find((h) => h.id === listingDetail.id) ?? null;
     }
     if (!base) return null;
     return mergeListingUnlockFields(
       base as AdaptedHouseListing | AdaptedBnbListing,
       listingDetailLive,
     ) as BnbListing | HouseListing;
-  }, [listingDetail, bnbListings, houseListings, listingDetailLive]);
+  }, [listingDetail, mapBnbs, mapHouses, bookedListingSnapshots, listingDetailLive]);
   const listingDetailMoreRows = useMemo(() => {
     if (!listingDetail) return [];
     const pool = listingDetail.kind === 'bnb' ? catalogBnbs : catalogHouses;
@@ -3663,8 +3903,58 @@ export default function App() {
   ]);
 
   const refreshListingsForArea = useCallback(() => {
+    if (listingCounty === 'any') {
+      void refreshAllListingsCatalog();
+      return;
+    }
+    if (listingCounty !== 'near_me') {
+      void refreshListingsCatalog(listingCounty);
+      return;
+    }
+    if (currentCoords) {
+      void refreshNearbyListings(
+        currentCoords.latitude,
+        currentCoords.longitude,
+        Math.max(staysRadiusKm, listingRadiusKm),
+      );
+      return;
+    }
     void refreshAllListingsCatalog();
-  }, [refreshAllListingsCatalog]);
+  }, [
+    currentCoords,
+    listingCounty,
+    staysRadiusKm,
+    listingRadiusKm,
+    refreshNearbyListings,
+    refreshAllListingsCatalog,
+    refreshListingsCatalog,
+  ]);
+
+  useEffect(() => {
+    if (listingCounty === 'any') {
+      void refreshAllListingsCatalog();
+      return;
+    }
+    if (listingCounty !== 'near_me') {
+      void refreshListingsCatalog(listingCounty);
+      return;
+    }
+    if (!currentCoords) return;
+    void refreshNearbyListings(
+      currentCoords.latitude,
+      currentCoords.longitude,
+      Math.max(staysRadiusKm, listingRadiusKm),
+    );
+  }, [
+    currentCoords?.latitude,
+    currentCoords?.longitude,
+    listingCounty,
+    staysRadiusKm,
+    listingRadiusKm,
+    refreshNearbyListings,
+    refreshAllListingsCatalog,
+    refreshListingsCatalog,
+  ]);
 
   const handleListingCountyChange = useCallback((key: string) => {
     setListingCounty(key as ListingCatalogArea);
@@ -3689,7 +3979,7 @@ export default function App() {
 
   useEffect(() => {
     if (currentCoords) return;
-    const fromProfile = profile?.county ? detectCountyFromText(profile.county) : null;
+    const fromProfile = profile?.county ? normalizeCountyKey(profile.county) : null;
     if (fromProfile) setCurrentCounty(fromProfile);
   }, [profile?.county, currentCoords]);
 
@@ -3714,6 +4004,10 @@ export default function App() {
   useEffect(() => {
     setListingsMapSelectedId(null);
   }, [listingCatalog, listingCounty, listingRadiusKm]);
+
+  useEffect(() => {
+    if (activeSegment !== 'home') setHomeHubCarouselActive(false);
+  }, [activeSegment]);
 
   useEffect(() => {
     if (homeDeepPage === 'listings' && listingsViewMode === 'map') {
@@ -3854,7 +4148,7 @@ export default function App() {
             if (entry?.short_code) textCandidates.push(String(entry.short_code));
           }
         }
-        const detectedFromText = textCandidates.map(detectCountyFromText).find(Boolean) || null;
+        const detectedFromText = textCandidates.map(normalizeCountyKey).find(Boolean) || null;
         if (detectedFromText) setCurrentCounty(detectedFromText);
         const preciseCoords = `${coords.latitude.toFixed(6)}, ${coords.longitude.toFixed(6)}`;
         if (placeName) {
@@ -4070,22 +4364,176 @@ export default function App() {
     }
     try {
       const { requests } = await fetchMyListingRequests();
-      try {
-        const { feedback } = await fetchMyFeedback();
-        const legacy = parseListingRequestsFromFeedback(feedback);
-        setListingRequests(mergeListingRequests(requests, legacy));
-      } catch {
-        setListingRequests(requests);
-      }
+      setListingRequests((previous) =>
+        requests.map((incoming) =>
+          mergeListingRequestWithLocalMessages(
+            previous.find((row) => row.id === incoming.id),
+            incoming,
+          ),
+        ),
+      );
     } catch {
-      try {
-        const { feedback } = await fetchMyFeedback();
-        setListingRequests(parseListingRequestsFromFeedback(feedback));
-      } catch {
-        /* keep existing */
-      }
+      // Keep existing in-memory requests; legacy feedback fallback is deprecated.
     }
   }, [isAuthed]);
+
+  const lastSeenReqStatusRef = useRef(new Map<string, string>());
+  const lastSeenLaundryStatusRef = useRef(new Map<string, string>());
+  const lastSeenReqMessageRef = useRef(new Map<string, string>());
+  const activityRealtimePrimedRef = useRef(false);
+  const activityRealtimeBusyRef = useRef(false);
+  const activityViewedRef = useRef<ActivityViewedSnapshot>(emptyActivityViewed());
+  const activityViewPrimedRef = useRef(false);
+  const [activityViewedTick, setActivityViewedTick] = useState(0);
+
+  const bumpActivityViewed = useCallback(() => {
+    setActivityViewedTick((v) => v + 1);
+  }, []);
+
+  const markListingRequestViewed = useCallback(
+    (requestId: string) => {
+      const req = listingRequests.find((r) => r.id === requestId);
+      if (!req) return;
+      activityViewedRef.current.requestStatus.set(requestId, req.status);
+      activityViewedRef.current.requestMessages.set(requestId, listingRequestMessageKey(req));
+      bumpActivityViewed();
+    },
+    [listingRequests, bumpActivityViewed],
+  );
+
+  const markStayBookingViewed = useCallback(
+    (bookingId: string) => {
+      const booking = bnbBookings.find((b) => b.id === bookingId);
+      if (!booking) return;
+      activityViewedRef.current.stayStatus.set(bookingId, booking.status);
+      bumpActivityViewed();
+    },
+    [bnbBookings, bumpActivityViewed],
+  );
+
+  const markLaundryOrderViewed = useCallback(
+    (orderId: string) => {
+      const order = laundryOrders.find((o) => o.id === orderId);
+      if (!order) return;
+      activityViewedRef.current.laundryStatus.set(orderId, `${order.status}:${order.currentStep}`);
+      bumpActivityViewed();
+    },
+    [laundryOrders, bumpActivityViewed],
+  );
+
+  const activityFeedItems = useMemo((): ActivityFeedItem[] => {
+    if (!activityViewPrimedRef.current) return [];
+    const viewed = activityViewedRef.current;
+    const items: ActivityFeedItem[] = [];
+
+    for (const req of listingRequests) {
+      if (!isActiveListingRequest(req.status)) continue;
+      const title = listingRequestActivityTitle(req);
+      const latest = req.messages?.[req.messages.length - 1];
+      const msgKey = listingRequestMessageKey(req);
+      const viewedMsg = viewed.requestMessages.get(req.id);
+      if (
+        latest &&
+        (latest.senderRole === 'admin' || latest.senderRole === 'system') &&
+        msgKey !== viewedMsg
+      ) {
+        items.push({
+          id: `chat:req:${req.id}:${latest.createdAt}`,
+          kind: 'chat',
+          entity: 'listing_request',
+          entityId: req.id,
+          title,
+          body: latest.body,
+          timeLabel: new Date(latest.createdAt).toLocaleString('en-KE', {
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+          }),
+          sortMs: Date.parse(latest.createdAt) || 0,
+        });
+      }
+      const viewedStatus = viewed.requestStatus.get(req.id);
+      if (viewedStatus !== undefined && req.status !== viewedStatus) {
+        const statusLabel =
+          req.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[req.status] ?? req.status;
+        items.push({
+          id: `status:req:${req.id}:${req.status}`,
+          kind: 'status',
+          entity: 'listing_request',
+          entityId: req.id,
+          title,
+          body: `Progress update · now ${statusLabel}`,
+          timeLabel: new Date(req.updatedAt ?? req.createdAt).toLocaleString('en-KE', {
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+          }),
+          sortMs: Date.parse(String(req.updatedAt ?? req.createdAt)) || 0,
+        });
+      }
+    }
+
+    for (const order of laundryOrders) {
+      if (['delivered', 'cancelled'].includes(order.status)) continue;
+      const statusKey = `${order.status}:${order.currentStep}`;
+      const viewedKey = viewed.laundryStatus.get(order.id);
+      if (viewedKey !== undefined && statusKey !== viewedKey) {
+        items.push({
+          id: `status:laundry:${order.id}:${statusKey}`,
+          kind: 'status',
+          entity: 'laundry',
+          entityId: order.id,
+          title: order.pickupLabel,
+          body: `Order update · ${order.status.replace(/_/g, ' ')}`,
+          timeLabel: new Date(order.createdAt).toLocaleString('en-KE', {
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+          }),
+          sortMs: Date.now(),
+        });
+      }
+    }
+
+    for (const booking of bnbBookings) {
+      if (!ACTIVE_BNB_BOOKING_STATUSES.has(booking.status)) continue;
+      const viewedStatus = viewed.stayStatus.get(booking.id);
+      if (viewedStatus !== undefined && booking.status !== viewedStatus) {
+        items.push({
+          id: `status:stay:${booking.id}:${booking.status}`,
+          kind: 'status',
+          entity: 'stay',
+          entityId: booking.id,
+          title: booking.listing?.title ?? 'BnB stay',
+          body: `Stay update · ${String(booking.status).replace(/_/g, ' ')}`,
+          timeLabel: new Date(booking.updatedAt ?? booking.createdAt).toLocaleString('en-KE', {
+            month: 'short',
+            day: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+          }),
+          sortMs: Date.parse(String(booking.updatedAt ?? booking.createdAt)) || 0,
+        });
+      }
+    }
+
+    return items.sort((a, b) => b.sortMs - a.sortMs);
+  }, [listingRequests, laundryOrders, bnbBookings, activityViewedTick]);
+
+  const activityUnreadByRequestId = useMemo(() => {
+    const map = new Map<string, { chat: boolean; status: boolean }>();
+    for (const item of activityFeedItems) {
+      if (item.entity !== 'listing_request') continue;
+      const prev = map.get(item.entityId) ?? { chat: false, status: false };
+      if (item.kind === 'chat') prev.chat = true;
+      if (item.kind === 'status') prev.status = true;
+      map.set(item.entityId, prev);
+    }
+    return map;
+  }, [activityFeedItems]);
 
   const reloadLaundryOrders = useCallback(async () => {
     if (!isAuthed) return;
@@ -4123,6 +4571,93 @@ export default function App() {
   }, [isAuthed]);
 
   useEffect(() => {
+    if (!isAuthed) {
+      activityRealtimePrimedRef.current = false;
+      activityViewPrimedRef.current = false;
+      lastSeenReqStatusRef.current.clear();
+      lastSeenLaundryStatusRef.current.clear();
+      lastSeenReqMessageRef.current.clear();
+      activityViewedRef.current = emptyActivityViewed();
+      setActivityBellCount(0);
+      setActivityChatCount(0);
+      return;
+    }
+
+    const nextReqStatuses = new Map<string, string>();
+    for (const req of listingRequests) {
+      nextReqStatuses.set(req.id, req.status);
+    }
+    const nextLaundryStatuses = new Map<string, string>();
+    for (const order of laundryOrders) {
+      nextLaundryStatuses.set(order.id, `${order.status}:${order.currentStep}`);
+    }
+    const nextReqMessages = new Map<string, string>();
+    for (const req of listingRequests) {
+      const latest = req.messages?.[req.messages.length - 1];
+      if (latest) nextReqMessages.set(req.id, `${latest.senderRole}:${latest.createdAt}`);
+    }
+
+    if (!activityRealtimePrimedRef.current) {
+      lastSeenReqStatusRef.current = nextReqStatuses;
+      lastSeenLaundryStatusRef.current = nextLaundryStatuses;
+      lastSeenReqMessageRef.current = nextReqMessages;
+      activityRealtimePrimedRef.current = true;
+      return;
+    }
+
+    let bellDelta = 0;
+    let chatDelta = 0;
+
+    for (const [id, statusKey] of nextReqStatuses.entries()) {
+      const prev = lastSeenReqStatusRef.current.get(id);
+      if (prev && prev !== statusKey) bellDelta += 1;
+    }
+    for (const [id, statusKey] of nextLaundryStatuses.entries()) {
+      const prev = lastSeenLaundryStatusRef.current.get(id);
+      if (prev && prev !== statusKey) bellDelta += 1;
+    }
+    for (const [id, messageKey] of nextReqMessages.entries()) {
+      const prev = lastSeenReqMessageRef.current.get(id);
+      if (!prev || prev === messageKey) continue;
+      const [senderRole] = messageKey.split(':');
+      if (senderRole === 'admin' || senderRole === 'system') chatDelta += 1;
+    }
+
+    if (bellDelta > 0) setActivityBellCount((v) => v + bellDelta);
+    if (chatDelta > 0) setActivityChatCount((v) => v + chatDelta);
+
+    lastSeenReqStatusRef.current = nextReqStatuses;
+    lastSeenLaundryStatusRef.current = nextLaundryStatuses;
+    lastSeenReqMessageRef.current = nextReqMessages;
+  }, [isAuthed, listingRequests, laundryOrders]);
+
+  /** Seed viewed snapshot on first load so only new updates appear in the feed. */
+  useEffect(() => {
+    if (!isAuthed || activityViewPrimedRef.current) return;
+    if (!activityRealtimePrimedRef.current) return;
+    const viewed = activityViewedRef.current;
+    for (const req of listingRequests) {
+      viewed.requestStatus.set(req.id, req.status);
+      viewed.requestMessages.set(req.id, listingRequestMessageKey(req));
+    }
+    for (const order of laundryOrders) {
+      viewed.laundryStatus.set(order.id, `${order.status}:${order.currentStep}`);
+    }
+    for (const booking of bnbBookings) {
+      viewed.stayStatus.set(booking.id, booking.status);
+    }
+    activityViewPrimedRef.current = true;
+    bumpActivityViewed();
+  }, [isAuthed, listingRequests, laundryOrders, bnbBookings, bumpActivityViewed]);
+
+  useEffect(() => {
+    if (!isAuthed) return;
+    if (activeTab !== 'activity') return;
+    setActivityBellCount(0);
+    setActivityChatCount(0);
+  }, [isAuthed, activeTab]);
+
+  useEffect(() => {
     if (!isAuthed) return;
     void (async () => {
       await reloadLaundryOrders();
@@ -4131,6 +4666,188 @@ export default function App() {
       await reloadListingRequests();
     })();
   }, [isAuthed, reloadLaundryOrders, reloadSubscription, reloadBnbBookings, reloadListingRequests]);
+
+  useEffect(() => {
+    if (!isAuthed) return;
+    let mounted = true;
+    const pollMs = activeTab === 'activity' ? 10000 : 20000;
+    const tick = async () => {
+      if (!mounted || activityRealtimeBusyRef.current) return;
+      if (activitySocketConnected) return;
+      if (AppState.currentState !== 'active') return;
+      activityRealtimeBusyRef.current = true;
+      try {
+        await reloadLaundryOrders();
+        await reloadBnbBookings();
+        await reloadListingRequests();
+      } finally {
+        activityRealtimeBusyRef.current = false;
+      }
+    };
+    const timer = setInterval(() => {
+      void tick();
+    }, pollMs);
+    return () => {
+      mounted = false;
+      clearInterval(timer);
+    };
+  }, [isAuthed, activeTab, activitySocketConnected, reloadLaundryOrders, reloadBnbBookings, reloadListingRequests]);
+
+  useEffect(() => {
+    if (!isAuthed) {
+      setActivitySocketConnected(false);
+      return;
+    }
+    let mounted = true;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectDelayMs = 1500;
+    let abortController: AbortController | null = null;
+
+    const reloadActivity = () => {
+      if (!mounted || activityRealtimeBusyRef.current) return;
+      activityRealtimeBusyRef.current = true;
+      void (async () => {
+        try {
+          await reloadLaundryOrders();
+          await reloadBnbBookings();
+          await reloadListingRequests();
+        } finally {
+          activityRealtimeBusyRef.current = false;
+        }
+      })();
+    };
+
+    const scheduleReconnect = () => {
+      if (!mounted) return;
+      setActivitySocketConnected(false);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(() => {
+        reconnectDelayMs = Math.min(reconnectDelayMs * 2, 15000);
+        void connect();
+      }, reconnectDelayMs);
+    };
+
+    const connect = async () => {
+      try {
+        const base = getApiBaseUrl();
+        const token = await getStoredToken();
+        if (!mounted || !base || !token) return;
+
+        abortController?.abort();
+        abortController = new AbortController();
+
+        const streamUrl = `${base.replace(/\/$/, '')}/api/v1/activity/stream?token=${encodeURIComponent(token)}`;
+        const response = await fetch(streamUrl, {
+          headers: { Accept: 'text/event-stream' },
+          signal: abortController.signal,
+        });
+        if (!response.ok || !response.body || typeof response.body.getReader !== 'function') {
+          scheduleReconnect();
+          return;
+        }
+
+        reconnectDelayMs = 1500;
+        setActivitySocketConnected(true);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (mounted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+          const chunks = buffer.split('\n\n');
+          buffer = chunks.pop() ?? '';
+          for (const chunk of chunks) {
+            const dataLine = chunk.split('\n').find((line) => line.startsWith('data: '));
+            if (!dataLine) continue;
+            try {
+              const payload = JSON.parse(dataLine.slice(6)) as { type?: string };
+              if (payload.type !== 'activity_update') continue;
+              reloadActivity();
+            } catch {
+              // ignore malformed SSE payloads
+            }
+          }
+        }
+
+        if (mounted) scheduleReconnect();
+      } catch (err) {
+        if (!mounted) return;
+        if (err instanceof Error && err.name === 'AbortError') return;
+        scheduleReconnect();
+      }
+    };
+
+    void connect();
+    return () => {
+      mounted = false;
+      setActivitySocketConnected(false);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      abortController?.abort();
+    };
+  }, [isAuthed, reloadLaundryOrders, reloadBnbBookings, reloadListingRequests]);
+
+  /** Chat fallback: while request sheet is open, poll fast for near-live messages. */
+  useEffect(() => {
+    if (!isAuthed || !listingRequestSheetId) return;
+    let mounted = true;
+    const tick = async () => {
+      if (!mounted || activityRealtimeBusyRef.current) return;
+      activityRealtimeBusyRef.current = true;
+      try {
+        await reloadListingRequests();
+        const { request } = await fetchListingRequest(listingRequestSheetId);
+        if (!mounted) return;
+        setListingRequestDetail((prev) => mergeListingRequestWithLocalMessages(prev, request));
+        setListingRequests((prev) =>
+          prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, request) : r)),
+        );
+      } finally {
+        activityRealtimeBusyRef.current = false;
+      }
+    };
+    void tick();
+    const timer = setInterval(() => {
+      void tick();
+    }, 3500);
+    return () => {
+      mounted = false;
+      clearInterval(timer);
+    };
+  }, [isAuthed, listingRequestSheetId, reloadListingRequests]);
+
+  useEffect(() => {
+    if (!isAuthed) return;
+    const catalogIds = new Set(bnbListings.map((listing) => listing.id));
+    const toFetch = [
+      ...new Set(
+        bnbBookings
+          .filter((booking) => ACTIVE_BNB_BOOKING_STATUSES.has(booking.status))
+          .map((booking) => booking.listingId)
+          .filter((listingId) => !catalogIds.has(listingId)),
+      ),
+    ];
+    if (toFetch.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      for (const listingId of toFetch) {
+        try {
+          const detail = await fetchListingDetail(listingId);
+          if (cancelled) return;
+          setBookedListingSnapshots((prev) =>
+            prev[listingId] ? prev : { ...prev, [listingId]: adaptBnbListing(detail) },
+          );
+        } catch {
+          /* stub row is enough until catalog reload */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthed, bnbBookings, bnbListings]);
 
   useEffect(() => {
     if (!listingDetail) {
@@ -4187,14 +4904,24 @@ export default function App() {
       setSheetHasMoreBelow(hasMore && !atBottom);
 
       if (pullRefreshing) return;
+      if (homeDeepPage === 'listings' && listingsViewMode === 'list') {
+        setListingsFiltersCollapsedAnimated(y > 52);
+      }
       if (Platform.OS === 'ios' && y < 0) {
         setPullProgress(Math.min(1, Math.abs(y) / PULL_REFRESH_THRESHOLD));
         return;
       }
       setPullProgress((p) => (p === 0 ? p : 0));
     },
-    [pullRefreshing],
+    [pullRefreshing, homeDeepPage, listingsViewMode, setListingsFiltersCollapsedAnimated],
   );
+
+  useEffect(() => {
+    if (homeDeepPage !== 'listings' || listingsViewMode !== 'list') {
+      listingsFiltersCollapsedRef.current = false;
+      setListingsFiltersCollapsed(false);
+    }
+  }, [homeDeepPage, listingsViewMode]);
 
   const onSheetContentSizeChange = useCallback((_w: number, h: number) => {
     sheetContentH.current = h;
@@ -4243,16 +4970,36 @@ export default function App() {
       const service = catalog === 'bnb' ? 'bnb' : 'rental';
       const title =
         kind === 'tour' ? '3D tour request' : kind === 'viewing' ? 'Viewing request' : 'Stay reservation';
+      const trimmedNote = opts?.userNote?.trim();
       try {
         const { request } = await createListingRequest({
           listingId,
           kind,
           pickupMode: kind === 'viewing' ? opts?.pickupMode : undefined,
-          userNote: opts?.userNote,
+          userNote: trimmedNote || undefined,
         });
+        const optimisticUserMessage: ListingRequestMessage | null = trimmedNote
+          ? {
+              id: `local-note-${Date.now()}`,
+              senderRole: 'user',
+              body: trimmedNote,
+              createdAt: new Date().toISOString(),
+            }
+          : null;
         setListingRequests((prev) => {
-          if (prev.some((r) => r.id === request.id)) return prev;
-          return [request, ...prev];
+          const existing = prev.find((r) => r.id === request.id);
+          const incoming: ListingRequest = {
+            ...request,
+            statusLabel: request.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[request.status] ?? 'Requested',
+            messages: mergeRequestMessages(
+              request.messages,
+              optimisticUserMessage ? [optimisticUserMessage] : [],
+            ),
+          };
+          if (existing) {
+            return prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, incoming) : r));
+          }
+          return [incoming, ...prev];
         });
         setViewingRequestTarget(null);
         flashBookingNotice(`${title} submitted — track updates in Activity`, { goTrips: true });
@@ -4267,7 +5014,7 @@ export default function App() {
             kind === 'viewing' && opts?.pickupMode
               ? ` Pickup preference: ${opts.pickupMode === 'taxi' ? 'car/taxi' : 'motorbike rider'}.`
               : '';
-          const noteLine = opts?.userNote ? ` Note: ${opts.userNote}` : '';
+          const noteLine = trimmedNote ? ` Note: ${trimmedNote}` : '';
           const body = `I would like to request a ${kind} for "${listingTitle}".${pickupLine}${noteLine} Please follow up via the app.`;
           const { feedback } = await submitFeedback({
             service,
@@ -4294,6 +5041,16 @@ export default function App() {
                     : 'Motorbike rider'
                   : null,
                 createdAt: feedback.createdAt,
+                messages: trimmedNote
+                  ? [
+                      {
+                        id: `local-note-${Date.now()}`,
+                        senderRole: 'user',
+                        body: trimmedNote,
+                        createdAt: new Date().toISOString(),
+                      },
+                    ]
+                  : [],
               },
               ...prev,
             ];
@@ -4397,6 +5154,7 @@ export default function App() {
 
   const openBookedStayDetail = useCallback(
     async (bookingId: string) => {
+      markStayBookingViewed(bookingId);
       const booking = bnbBookings.find((b) => b.id === bookingId);
       if (!booking) return;
       setBookedStaySheetBooking(booking);
@@ -4412,19 +5170,22 @@ export default function App() {
         setBookedStayLoading(false);
       }
     },
-    [bnbBookings],
+    [bnbBookings, markStayBookingViewed],
   );
 
   const openListingRequestDetail = useCallback(
     async (requestId: string) => {
+      markListingRequestViewed(requestId);
       setListingRequestSheetId(requestId);
       const cached = listingRequests.find((r) => r.id === requestId) ?? null;
       setListingRequestDetail(cached);
       setListingRequestSheetLoading(true);
       try {
         const { request } = await fetchListingRequest(requestId);
-        setListingRequestDetail(request);
-        setListingRequests((prev) => prev.map((r) => (r.id === request.id ? request : r)));
+        setListingRequestDetail((prev) => mergeListingRequestWithLocalMessages(prev, request));
+        setListingRequests((prev) =>
+          prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, request) : r)),
+        );
       } catch {
         if (!cached) {
           setListingRequestSheetId(null);
@@ -4435,7 +5196,7 @@ export default function App() {
         setListingRequestSheetLoading(false);
       }
     },
-    [listingRequests],
+    [listingRequests, markListingRequestViewed],
   );
 
   const handleListingRequestReply = useCallback(
@@ -4444,8 +5205,10 @@ export default function App() {
       setListingRequestReplySubmitting(true);
       try {
         const { request } = await replyToListingRequest(listingRequestSheetId, body);
-        setListingRequestDetail(request);
-        setListingRequests((prev) => prev.map((r) => (r.id === request.id ? request : r)));
+        setListingRequestDetail((prev) => mergeListingRequestWithLocalMessages(prev, request));
+        setListingRequests((prev) =>
+          prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, request) : r)),
+        );
       } catch (err) {
         setBookingMessage(err instanceof Error ? err.message : 'Could not send reply');
         throw err;
@@ -4543,6 +5306,7 @@ export default function App() {
         setBnbBookingTarget(null);
         const detail = await fetchListingDetail(listingId);
         setListingDetailLive(detail);
+        setBookedListingSnapshots((prev) => ({ ...prev, [listingId]: adaptBnbListing(detail) }));
         flashBookingNotice(
           opts?.stayOnListing
             ? 'Stay booked — exact address unlocked below'
@@ -4777,13 +5541,13 @@ export default function App() {
     if (homeDeepPage !== 'listing-detail' || !listingDetail) return;
     const ok =
       listingDetail.kind === 'bnb'
-        ? bnbListings.some((b) => b.id === listingDetail.id)
-        : houseListings.some((h) => h.id === listingDetail.id);
+        ? mapBnbs.some((b) => b.id === listingDetail.id)
+        : mapHouses.some((h) => h.id === listingDetail.id);
     if (!ok) {
       setListingDetail(null);
       setHomeDeepPage('listings');
     }
-  }, [homeDeepPage, listingDetail]);
+  }, [homeDeepPage, listingDetail, mapBnbs, mapHouses]);
 
   useLayoutEffect(() => {
     if (homeDeepPage !== 'listing-detail' || !listingDetail) return;
@@ -5790,8 +6554,8 @@ export default function App() {
       !homeListingPreview
         ? null
         : homeListingPreview.catalog === 'bnb'
-          ? (bnbListings.find((b) => b.id === homeListingPreview.id) ?? null)
-          : (houseListings.find((h) => h.id === homeListingPreview.id) ?? null);
+          ? (mapBnbs.find((b) => b.id === homeListingPreview.id) ?? null)
+          : (mapHouses.find((h) => h.id === homeListingPreview.id) ?? null);
 
     const heroCardWidth = windowWidth - gutter * 2;
     const renderSectionHero = (slides: IntroHeroSlide[], hint: string, height = 200) => (
@@ -5805,29 +6569,8 @@ export default function App() {
     );
 
     const sheetInner = (() => {
-      if (isComingSoonSegment) {
-        const info = COMING_SOON_SERVICE_INFO[activeSegment];
-        return (
-          <>
-            {renderSectionHero(comingSoonHeroSlides(activeSegment), `How ${info.title} will work`)}
-            <View style={[styles.comingSoonEmojiBanner, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
-              <Text style={[styles.comingSoonEmojiBannerText, { color: theme.primary }]}>
-                Coming soon
-              </Text>
-            </View>
-            <Text style={[styles.juxSectionLabel, styles.valetSectionLabelSpaced]}>What to expect</Text>
-            {info.features.map((line) => (
-              <View key={line} style={styles.juxListingBulletRow}>
-                <Text style={styles.juxListingBulletGlyph}>●</Text>
-                <Text style={[styles.juxListingBulletText, { color: theme.textPrimary }]}>{line}</Text>
-              </View>
-            ))}
-            <Text style={[styles.comingSoonMore, { color: theme.textMuted }]}>
-              More services on the way — Jua X is building your everyday super-app.
-            </Text>
-          </>
-        );
-      }
+      // Activity / Profile must win over coming-soon segments (Rides, Movers, etc.).
+      // Otherwise switching tabs while on a coming-soon service leaves that page stuck.
       if (activeTab === 'activity') {
         const activeOrders = laundryOrders.filter(
           (o) => !['delivered', 'cancelled'].includes(o.status),
@@ -5840,6 +6583,20 @@ export default function App() {
         );
         const openRequests = listingRequests.filter((r) => isActiveListingRequest(r.status));
         const listingRequestStepLabels = LISTING_REQUEST_STEPS.map((s) => LISTING_REQUEST_STATUS_LABELS[s]);
+
+        const handleActivityFeedPress = (item: ActivityFeedItem) => {
+          if (item.entity === 'listing_request') {
+            void openListingRequestDetail(item.entityId);
+            return;
+          }
+          if (item.entity === 'stay') {
+            void openBookedStayDetail(item.entityId);
+            return;
+          }
+          if (item.entity === 'laundry') {
+            markLaundryOrderViewed(item.entityId);
+          }
+        };
 
         const activeItems = [
           ...activeOrders.map((order) => ({
@@ -5904,224 +6661,456 @@ export default function App() {
             })),
         ];
 
-        return (
-          <>
-            <Text style={styles.makeTripsTitle}>My Activity</Text>
-            <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
-              Laundry, stays, listing requests & trips — all in one place.
-            </Text>
-            {!isAuthed ? (
-              <Text style={[styles.juxHintMuted, { marginBottom: 16 }]}>Sign in to track orders and requests.</Text>
-            ) : rentalSubscriptionActive ? (
-              <View style={[styles.makeTripCard, { backgroundColor: theme.mutedSurface, marginBottom: 12 }]}>
-                <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
-                  Saka Keja · {activeSubscriptionPlan ?? 'rental'} plan active
-                </Text>
-                <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                  Unlocked: exact rental addresses, landlord contact, viewing requests
-                </Text>
+        const fuaActive = activeItems.filter((t) => t.type === 'laundry');
+        const kejaActive = activeItems.filter((t) => t.type === 'stay');
+        const fuaUpdates = activityFeedItems.filter((i) => i.entity === 'laundry');
+        const kejaUpdates = [
+          ...activityFeedItems.filter((i) => i.entity === 'stay' || i.entity === 'listing_request'),
+          ...openRequests,
+        ];
+        const followUpCount =
+          fuaActive.length +
+          kejaActive.length +
+          pendingPayments.length +
+          fuaUpdates.length +
+          openRequests.length +
+          activityFeedItems.filter((i) => i.entity === 'stay' || i.entity === 'listing_request').length;
+        const byServiceCount = fuaActive.length + kejaActive.length + openRequests.length;
+        const sectionTabs: { key: typeof activitySection; label: string; count: number }[] = [
+          { key: 'active', label: 'Follow-up', count: followUpCount },
+          { key: 'updates', label: 'By service', count: byServiceCount },
+          { key: 'history', label: 'Past', count: historyItems.length },
+        ];
+
+        const renderServiceHeader = (label: string, icon: AppIconName, color: string, count: number) => (
+          <View style={styles.activityServiceHeader}>
+            <View style={[styles.activityIconWell, { backgroundColor: `${color}22` }]}>
+              <AppIcon name={icon} size={16} color={color} />
+            </View>
+            <AccessibleText style={[styles.activityServiceTitle, { color: theme.textPrimary }]}>
+              {label}
+            </AccessibleText>
+            {count > 0 ? (
+              <View style={[styles.activityServiceCount, { backgroundColor: theme.mutedSurface }]}>
+                <AccessibleText style={[styles.activityServiceCountText, { color: theme.textSecondary }]}>
+                  {count}
+                </AccessibleText>
               </View>
             ) : null}
-            {openRequests.length > 0 ? (
-              <>
-                <MakeLabel darkMode={themeMode === 'dark'}>Listing requests</MakeLabel>
-                <View style={styles.makeTripsActiveList}>
-                  {openRequests.map((req) => {
-                    const step = req.stepIndex ?? listingRequestStepIndex(req.status);
-                    const statusLabel =
-                      req.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[req.status] ?? req.status;
-                    return (
-                      <Pressable
-                        key={`req-${req.id}`}
-                        onPress={() => void openListingRequestDetail(req.id)}
-                        style={({ pressed }) => [
-                          styles.makeTripCard,
-                          { backgroundColor: theme.sheet, opacity: pressed ? 0.92 : 1 },
-                        ]}
-                      >
-                        <View style={styles.makeTripCardHead}>
-                          <View style={[styles.makeTripDotWrap, { backgroundColor: '#A78BFA33' }]}>
-                            <View style={[styles.makeTripDot, { backgroundColor: '#A78BFA' }]} />
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
-                              {req.kind === 'tour'
-                                ? `BnB tour · ${req.listingTitle}`
-                                : req.kind === 'viewing'
-                                  ? `House viewing · ${req.listingTitle}`
-                                  : `Stay · ${req.listingTitle}`}
-                            </Text>
-                            <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                              {req.service === 'bnb' ? 'BnB' : 'Rental'} · {statusLabel}
-                              {req.kind === 'viewing' && req.pickupModeLabel ? ` · ${req.pickupModeLabel}` : ''}
-                            </Text>
-                            <Text style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>
-                              Tap for messages & updates →
-                            </Text>
-                          </View>
-                        </View>
-                        <MakeDivider darkMode={themeMode === 'dark'} />
-                        <MakeStatusStepper
-                          steps={listingRequestStepLabels}
-                          current={Math.max(0, step)}
-                          darkMode={themeMode === 'dark'}
-                        />
-                      </Pressable>
-                    );
-                  })}
+          </View>
+        );
+
+        return (
+          <>
+            <View style={styles.activityHero}>
+              <View style={styles.activityHeroText}>
+                <AccessibleText style={[styles.activityTitle, { color: theme.textPrimary }]}>Activity</AccessibleText>
+                <AccessibleText style={[styles.activitySubtitle, { color: theme.textSecondary }]}>
+                  {!isAuthed
+                    ? 'Sign in to track orders'
+                    : followUpCount > 0
+                      ? `${followUpCount} needing attention`
+                      : activitySocketConnected
+                        ? 'All caught up · live on'
+                        : 'Orders, stays & requests'}
+                </AccessibleText>
+              </View>
+              <View style={styles.activityHeroIcons}>
+                <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.laundry}22` }]}>
+                  <AppIcon name="washer" size={16} color={SERVICE_DOT_COLORS.laundry} />
                 </View>
-              </>
-            ) : null}
-            <MakeLabel darkMode={themeMode === 'dark'}>Orders & trips</MakeLabel>
-            <View style={styles.makeTripsActiveList}>
-                  {activeItems.length === 0 ? (
-                <View style={[styles.makeTripCard, { backgroundColor: theme.sheet }]}>
-                  <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                    {openRequests.length > 0
-                      ? 'No active laundry or stay orders right now.'
-                      : 'No active orders — book Fua or request a listing tour from Home.'}
-                  </Text>
+                <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                  <AppIcon name="home" size={16} color={SERVICE_DOT_COLORS.stay} />
                 </View>
-              ) : (
-                activeItems.map((trip) => (
-                  <Pressable
-                    key={`${trip.type}-${trip.id}`}
-                    onPress={
-                      trip.type === 'stay'
-                        ? () => void openBookedStayDetail(trip.id)
-                        : undefined
-                    }
-                    style={({ pressed }) => [
-                      styles.makeTripCard,
-                      { backgroundColor: theme.sheet, opacity: trip.type === 'stay' && pressed ? 0.92 : 1 },
-                    ]}
-                  >
-                    <View style={styles.makeTripCardHead}>
-                      <View
-                        style={[
-                          styles.makeTripDotWrap,
-                          { backgroundColor: `${SERVICE_DOT_COLORS[trip.type]}33` },
-                        ]}
-                      >
-                        <View
-                          style={[styles.makeTripDot, { backgroundColor: SERVICE_DOT_COLORS[trip.type] }]}
-                        />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{trip.title}</Text>
-                        <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>{trip.sub}</Text>
-                        {trip.amount !== '—' ? (
-                          <Text style={[styles.makeTripSub, { color: theme.textMuted }]}>
-                            {trip.amount} · Pay: {trip.payment}
-                          </Text>
-                        ) : null}
-                        {trip.type === 'stay' ? (
-                          <Text style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>
-                            Tap for address, coords & navigation →
-                          </Text>
-                        ) : null}
-                      </View>
-                    </View>
-                    {trip.steps.length > 0 ? (
-                      <>
-                        <MakeDivider darkMode={themeMode === 'dark'} />
-                        <MakeStatusStepper steps={trip.steps} current={trip.step} darkMode={themeMode === 'dark'} />
-                      </>
-                    ) : null}
-                  </Pressable>
-                ))
-              )}
+                {(activityBellCount > 0 || activityChatCount > 0) ? (
+                  <View style={[styles.activityBadgePill, { backgroundColor: theme.primaryLight }]}>
+                    <Ionicons name="notifications-outline" size={16} color={theme.primary} />
+                    <AccessibleText style={[styles.activityBadgeText, { color: theme.primary }]}>
+                      {activityTabBadgeCount > 99 ? '99+' : String(activityTabBadgeCount)}
+                    </AccessibleText>
+                  </View>
+                ) : null}
+              </View>
             </View>
-            {pendingPayments.length > 0 ? (
-              <>
-                <MakeLabel darkMode={themeMode === 'dark'}>Payments due</MakeLabel>
-                <View style={[styles.makeHistoryCard, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
-                  {pendingPayments.map((order, i) => (
-                    <View
-                      key={order.id}
+
+            <View style={[styles.activityTabs, { backgroundColor: theme.mutedSurface }]}>
+              {sectionTabs.map((tab) => {
+                const on = activitySection === tab.key;
+                return (
+                  <PressableScale
+                    key={tab.key}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected: on }}
+                    style={[styles.activityTab, on && { backgroundColor: theme.primaryLight }]}
+                    onPress={() => {
+                      HapticMap.selection();
+                      setActivitySection(tab.key);
+                    }}
+                  >
+                    <AccessibleText
                       style={[
-                        styles.makeHistoryRow,
-                        i < pendingPayments.length - 1 && {
-                          borderBottomWidth: StyleSheet.hairlineWidth,
-                          borderBottomColor: theme.border,
-                        },
+                        styles.activityTabLabel,
+                        { color: on ? theme.primary : theme.textSecondary },
                       ]}
                     >
-                      <View style={{ flex: 1 }}>
-                        <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{order.pickupLabel}</Text>
-                        <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                          M-Pesa · {order.paymentStatus}
-                        </Text>
-                      </View>
-                      <Text style={[styles.makeHistoryAmount, { color: theme.primary }]}>
-                        KES {order.totalKes.toLocaleString()}
-                      </Text>
-                    </View>
-                  ))}
-                </View>
+                      {tab.label}
+                      {tab.count > 0 ? ` · ${tab.count}` : ''}
+                    </AccessibleText>
+                  </PressableScale>
+                );
+              })}
+            </View>
+
+            {activitySection === 'active' ? (
+              <>
+                {followUpCount === 0 ? (
+                  <EmptyState
+                    icon="✨"
+                    title="You're all set"
+                    description="Payments, chats, and open requests will show here."
+                    darkMode={theme.isDark}
+                    mutedSurface={theme.mutedSurface}
+                    textPrimary={theme.textPrimary}
+                    textSecondary={theme.textSecondary}
+                    primary={theme.primary}
+                    border={theme.border}
+                  />
+                ) : (
+                  <View style={styles.makeTripsActiveList}>
+                    {pendingPayments.length > 0 ? (
+                      <>
+                        {renderServiceHeader('Payments', 'card', theme.primary, pendingPayments.length)}
+                        {pendingPayments.map((order) => (
+                          <View
+                            key={`pay-${order.id}`}
+                            style={[
+                              styles.activityCard,
+                              nestedChrome(themeMode === 'dark'),
+                              { borderColor: theme.primary },
+                            ]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${theme.primary}18` }]}>
+                              <AppIcon name="card" size={18} color={theme.primary} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
+                                Pay for Fua
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                                {order.pickupLabel}
+                              </AccessibleText>
+                            </View>
+                            <AccessibleText style={[styles.makeHistoryAmount, { color: theme.primary }]}>
+                              KES {order.totalKes.toLocaleString()}
+                            </AccessibleText>
+                          </View>
+                        ))}
+                      </>
+                    ) : null}
+
+                    {(fuaActive.length > 0 || fuaUpdates.length > 0) ? (
+                      <>
+                        {renderServiceHeader('Fua', 'washer', SERVICE_DOT_COLORS.laundry, fuaActive.length + fuaUpdates.length)}
+                        {fuaUpdates.map((item) => (
+                          <PressableScale
+                            key={item.id}
+                            onPress={() => handleActivityFeedPress(item)}
+                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.laundry}22` }]}>
+                              <AppIcon name="washer" size={18} color={SERVICE_DOT_COLORS.laundry} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
+                                {item.title}
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]} numberOfLines={2}>
+                                {item.body}
+                              </AccessibleText>
+                            </View>
+                          </PressableScale>
+                        ))}
+                        {fuaActive.map((trip) => (
+                          <View
+                            key={`fua-${trip.id}`}
+                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.laundry}22` }]}>
+                              <AppIcon name="washer" size={18} color={SERVICE_DOT_COLORS.laundry} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                                {trip.title}
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]} numberOfLines={1}>
+                                {trip.sub}
+                              </AccessibleText>
+                              {trip.steps.length > 0 ? (
+                                <View style={{ marginTop: 8 }}>
+                                  <MakeStatusStepper
+                                    steps={trip.steps}
+                                    current={trip.step}
+                                    darkMode={themeMode === 'dark'}
+                                  />
+                                </View>
+                              ) : null}
+                            </View>
+                          </View>
+                        ))}
+                      </>
+                    ) : null}
+
+                    {(kejaActive.length > 0 || kejaUpdates.length > 0) ? (
+                      <>
+                        {renderServiceHeader(
+                          'Keja',
+                          'home',
+                          SERVICE_DOT_COLORS.stay,
+                          kejaActive.length + openRequests.length + activityFeedItems.filter((i) => i.entity === 'stay' || i.entity === 'listing_request').length,
+                        )}
+                        {activityFeedItems
+                          .filter((i) => i.entity === 'stay' || i.entity === 'listing_request')
+                          .map((item) => (
+                            <PressableScale
+                              key={item.id}
+                              onPress={() => handleActivityFeedPress(item)}
+                              style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                            >
+                              <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                                <AppIcon name="home" size={18} color={SERVICE_DOT_COLORS.stay} />
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]}>
+                                  {item.title}
+                                </AccessibleText>
+                                <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]} numberOfLines={2}>
+                                  {item.body}
+                                </AccessibleText>
+                              </View>
+                            </PressableScale>
+                          ))}
+                        {openRequests.map((req) => {
+                          const statusLabel =
+                            req.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[req.status] ?? req.status;
+                          return (
+                            <PressableScale
+                              key={`req-${req.id}`}
+                              onPress={() => void openListingRequestDetail(req.id)}
+                              style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                            >
+                              <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                                <AppIcon name="home" size={18} color={SERVICE_DOT_COLORS.stay} />
+                              </View>
+                              <View style={{ flex: 1 }}>
+                                <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                                  {req.listingTitle}
+                                </AccessibleText>
+                                <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                                  {req.kind === 'tour' ? 'Tour' : req.kind === 'viewing' ? 'Viewing' : 'Stay'} · {statusLabel}
+                                </AccessibleText>
+                              </View>
+                              <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+                            </PressableScale>
+                          );
+                        })}
+                        {kejaActive.map((trip) => (
+                          <PressableScale
+                            key={`keja-${trip.id}`}
+                            onPress={() => void openBookedStayDetail(trip.id)}
+                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                              <AppIcon name="stays" size={18} color={SERVICE_DOT_COLORS.stay} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                                {trip.title}
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]} numberOfLines={1}>
+                                {trip.sub}
+                              </AccessibleText>
+                              {trip.steps.length > 0 ? (
+                                <View style={{ marginTop: 8 }}>
+                                  <MakeStatusStepper
+                                    steps={trip.steps}
+                                    current={trip.step}
+                                    darkMode={themeMode === 'dark'}
+                                  />
+                                </View>
+                              ) : null}
+                            </View>
+                          </PressableScale>
+                        ))}
+                      </>
+                    ) : null}
+                  </View>
+                )}
+                {completedOrders.filter((o) => o.status === 'delivered').length > 0 ? (
+                  <View style={{ marginTop: 8 }}>
+                    {completedOrders
+                      .filter((o) => o.status === 'delivered')
+                      .slice(0, 2)
+                      .map((order) => (
+                        <FuaFeedbackCard
+                          key={`fb-${order.id}`}
+                          order={order}
+                          theme={theme}
+                          onConfirmed={(updated) => {
+                            setLaundryOrders((prev) =>
+                              prev.map((o) => (o.id === updated.id ? { ...o, ...updated } : o)),
+                            );
+                          }}
+                        />
+                      ))}
+                  </View>
+                ) : null}
               </>
             ) : null}
-            <MakeLabel darkMode={themeMode === 'dark'}>History</MakeLabel>
-            <View style={[styles.makeHistoryCard, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
-              {historyItems.length === 0 ? (
-                <Text style={[styles.makeTripSub, { color: theme.textSecondary, padding: 12 }]}>
-                  Completed orders appear here.
-                </Text>
-              ) : (
-                historyItems.map((h, i) => (
-                  <Pressable
-                    key={h.id}
-                    onPress={
-                      'kind' in h && h.kind === 'stay'
-                        ? () => void openBookedStayDetail(h.id)
-                        : 'kind' in h && h.kind === 'listing_request'
-                          ? () => void openListingRequestDetail(h.id)
-                          : undefined
-                    }
-                    style={({ pressed }) => [
-                      styles.makeHistoryRow,
-                      i < historyItems.length - 1 && {
-                        borderBottomWidth: StyleSheet.hairlineWidth,
-                        borderBottomColor: theme.border,
-                      },
-                      'kind' in h && (h.kind === 'stay' || h.kind === 'listing_request') && pressed
-                        ? { opacity: 0.92 }
-                        : null,
-                    ]}
-                  >
-                    <View style={[styles.makeHistoryIcon, { backgroundColor: theme.mutedSurface }]}>
-                      <Text style={styles.makeHistoryCheck}>✓</Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={[styles.makeTripTitle, { color: theme.textPrimary }]}>{h.title}</Text>
-                      <Text style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                        {h.date} · {h.payment}
-                      </Text>
-                    </View>
-                    <Text style={[styles.makeHistoryAmount, { color: theme.textSecondary }]}>{h.amount}</Text>
-                  </Pressable>
-                ))
-              )}
-            </View>
-            {completedOrders.filter((o) => o.status === 'delivered').length > 0 ? (
+
+            {activitySection === 'updates' ? (
               <>
-                <MakeLabel darkMode={themeMode === 'dark'}>Rate your FUA</MakeLabel>
-                {completedOrders
-                  .filter((o) => o.status === 'delivered')
-                  .slice(0, 3)
-                  .map((order) => (
-                    <FuaFeedbackCard
-                      key={`fb-${order.id}`}
-                      order={order}
-                      theme={theme}
-                      onConfirmed={(updated) => {
-                        setLaundryOrders((prev) =>
-                          prev.map((o) => (o.id === updated.id ? { ...o, ...updated } : o)),
-                        );
-                      }}
-                    />
-                  ))}
+                {fuaActive.length === 0 && kejaActive.length === 0 && openRequests.length === 0 ? (
+                  <EmptyState
+                    icon="🏠"
+                    title="No open services"
+                    description="Active Fua and Keja items will group here by service."
+                    darkMode={theme.isDark}
+                    mutedSurface={theme.mutedSurface}
+                    textPrimary={theme.textPrimary}
+                    textSecondary={theme.textSecondary}
+                    primary={theme.primary}
+                    border={theme.border}
+                  />
+                ) : (
+                  <View style={styles.makeTripsActiveList}>
+                    {fuaActive.length > 0 ? (
+                      <>
+                        {renderServiceHeader('Fua', 'washer', SERVICE_DOT_COLORS.laundry, fuaActive.length)}
+                        {fuaActive.map((trip) => (
+                          <View
+                            key={`svc-fua-${trip.id}`}
+                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.laundry}22` }]}>
+                              <AppIcon name="washer" size={18} color={SERVICE_DOT_COLORS.laundry} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                                {trip.title}
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                                {trip.sub}
+                                {trip.amount !== '—' ? ` · ${trip.amount}` : ''}
+                              </AccessibleText>
+                            </View>
+                          </View>
+                        ))}
+                      </>
+                    ) : null}
+                    {(kejaActive.length > 0 || openRequests.length > 0) ? (
+                      <>
+                        {renderServiceHeader(
+                          'Keja',
+                          'home',
+                          SERVICE_DOT_COLORS.stay,
+                          kejaActive.length + openRequests.length,
+                        )}
+                        {openRequests.map((req) => (
+                          <PressableScale
+                            key={`svc-req-${req.id}`}
+                            onPress={() => void openListingRequestDetail(req.id)}
+                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                              <AppIcon name="home" size={18} color={SERVICE_DOT_COLORS.stay} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                                {req.listingTitle}
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                                {req.kind === 'tour' ? 'Tour request' : req.kind === 'viewing' ? 'Viewing request' : 'Stay request'}
+                              </AccessibleText>
+                            </View>
+                            <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+                          </PressableScale>
+                        ))}
+                        {kejaActive.map((trip) => (
+                          <PressableScale
+                            key={`svc-keja-${trip.id}`}
+                            onPress={() => void openBookedStayDetail(trip.id)}
+                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
+                          >
+                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                              <AppIcon name="stays" size={18} color={SERVICE_DOT_COLORS.stay} />
+                            </View>
+                            <View style={{ flex: 1 }}>
+                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                                {trip.title}
+                              </AccessibleText>
+                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                                {trip.sub}
+                              </AccessibleText>
+                            </View>
+                          </PressableScale>
+                        ))}
+                      </>
+                    ) : null}
+                  </View>
+                )}
               </>
+            ) : null}
+
+            {activitySection === 'history' ? (
+              <View style={[styles.makeHistoryCard, nestedChrome(themeMode === 'dark'), { borderColor: theme.border }]}>
+                {historyItems.length === 0 ? (
+                  <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary, padding: 16 }]}>
+                    Completed orders appear here.
+                  </AccessibleText>
+                ) : (
+                  historyItems.map((h, i) => {
+                    const isStay = 'kind' in h && h.kind === 'stay';
+                    const isReq = 'kind' in h && h.kind === 'listing_request';
+                    const iconName: AppIconName = isStay || isReq ? 'home' : 'washer';
+                    const iconColor = isStay || isReq ? SERVICE_DOT_COLORS.stay : SERVICE_DOT_COLORS.laundry;
+                    return (
+                      <Pressable
+                        key={h.id}
+                        onPress={
+                          isStay
+                            ? () => void openBookedStayDetail(h.id)
+                            : isReq
+                              ? () => void openListingRequestDetail(h.id)
+                              : undefined
+                        }
+                        style={({ pressed }) => [
+                          styles.makeHistoryRow,
+                          i < historyItems.length - 1 && {
+                            borderBottomWidth: StyleSheet.hairlineWidth,
+                            borderBottomColor: theme.border,
+                          },
+                          pressed ? { opacity: 0.92 } : null,
+                        ]}
+                      >
+                        <View style={[styles.makeHistoryIcon, { backgroundColor: `${iconColor}22` }]}>
+                          <AppIcon name={iconName} size={14} color={iconColor} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
+                            {h.title}
+                          </AccessibleText>
+                          <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                            {h.date}
+                          </AccessibleText>
+                        </View>
+                        <AccessibleText style={[styles.makeHistoryAmount, { color: theme.textSecondary }]}>
+                          {h.amount}
+                        </AccessibleText>
+                      </Pressable>
+                    );
+                  })
+                )}
+              </View>
             ) : null}
           </>
         );
@@ -6140,49 +7129,31 @@ export default function App() {
           ? new Date(profile.signedUpAt).toLocaleDateString('en-KE', { month: 'short', year: 'numeric' })
           : '—';
         const laundryCount = profile?.stats?.laundryOrders ?? laundryOrders.length;
-        const membershipLabel = rentalSubscriptionActive
-          ? `Active · ${activeSubscriptionPlan ?? 'rental'} plan`
-          : subscriptionPlans.length > 0
-            ? `${subscriptionPlans[0].label} from KES ${subscriptionPlans[0].priceKes}`
-            : 'Browse plans in Saka Keja';
-        const profileSections = [
-          {
-            title: 'Account',
-            items: [
-              { icon: '📍', label: 'Saved addresses', detail: '2 saved', toggle: false },
-              { icon: '💳', label: 'Payment methods', detail: 'M-Pesa, Cash', toggle: false },
-            ],
-          },
-          {
-            title: 'Preferences',
-            items: [
-              { icon: '🔔', label: 'Notifications', detail: 'Ops messages via Activity · push soon', toggle: true, value: true },
-            ],
-          },
-          {
-            title: 'Support',
-            items: [{ icon: '❓', label: 'Help & support', detail: null as string | null, toggle: false }],
-          },
-        ];
+        const nestSurface = nestedChrome(themeMode === 'dark');
         return (
           <>
-            <Pressable onPress={() => profile && setProfileEditOpen(true)} style={styles.makeProfileHead}>
+            <PressableScale
+              onPress={() => profile && setProfileEditOpen(true)}
+              style={[styles.profileHero, nestSurface]}
+              accessibilityRole="button"
+              accessibilityLabel="Edit profile"
+            >
               <View style={[styles.makeProfileAvatar, { backgroundColor: theme.primary }]}>
-                <Text style={styles.makeProfileAvatarText}>{initials || 'JX'}</Text>
+                <AccessibleText style={styles.makeProfileAvatarText}>{initials || 'JX'}</AccessibleText>
               </View>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.makeProfileName, { color: theme.textPrimary }]}>{displayName}</Text>
-                <Text style={[styles.makeProfilePhone, { color: theme.textSecondary }]}>
-                  {email || phone}
-                </Text>
-                {profile?.bio ? (
-                  <Text style={[styles.makeTripSub, { color: theme.textMuted, marginTop: 4 }]} numberOfLines={2}>
-                    {profile.bio}
-                  </Text>
-                ) : null}
-                <Text style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>Tap to edit profile</Text>
+              <View style={{ flex: 1, minWidth: 0 }}>
+                <AccessibleText style={[styles.makeProfileName, { color: theme.textPrimary }]} numberOfLines={1}>
+                  {displayName}
+                </AccessibleText>
+                <AccessibleText style={[styles.makeProfilePhone, { color: theme.textSecondary }]} numberOfLines={1}>
+                  {email || phone || 'Add contact details'}
+                </AccessibleText>
+                <AccessibleText style={[styles.makeTripSub, { color: theme.primary, marginTop: 4 }]}>
+                  Edit profile
+                </AccessibleText>
               </View>
-            </Pressable>
+              <Ionicons name="chevron-forward" size={18} color={theme.textMuted} />
+            </PressableScale>
             {profile ? (
               <ProfileEditor
                 visible={profileEditOpen}
@@ -6192,113 +7163,192 @@ export default function App() {
                 theme={theme}
               />
             ) : null}
-            <Pressable
-              onPress={() => void signOut()}
-              style={[styles.makeProfileCard, { backgroundColor: theme.sheet, borderColor: theme.border, marginBottom: 16 }]}
-            >
-              <Text style={[styles.makeProfileRowLabel, { color: Colors.light.error }]}>Sign out</Text>
-            </Pressable>
-            <View style={styles.makeStatsGrid}>
-              {[
-                { label: 'Member since', value: memberSince },
-                { label: 'FUA orders', value: String(laundryCount) },
-                { label: 'Membership', value: membershipLabel },
-              ].map((s) => (
-                <View key={s.label} style={[styles.makeStatCell, { backgroundColor: theme.mutedSurface }]}>
-                  <Text style={[styles.makeStatLabel, { color: theme.textSecondary }]}>{s.label}</Text>
-                  <Text style={[styles.makeStatValue, { color: theme.textPrimary }]}>{s.value}</Text>
-                </View>
-              ))}
-            </View>
-            {profileSections.map((sec) => (
-              <View key={sec.title} style={styles.makeProfileSection}>
-                <MakeLabel darkMode={themeMode === 'dark'}>{sec.title}</MakeLabel>
-                <View style={[styles.makeProfileCard, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
-                  {sec.items.map((item, i) => (
-                    <Pressable
-                      key={item.label}
-                      style={[
-                        styles.makeProfileRow,
-                        i < sec.items.length - 1 && { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: theme.border },
-                      ]}
-                    >
-                      <View style={[styles.makeProfileRowIcon, { backgroundColor: theme.mutedSurface }]}>
-                        <Text style={styles.makeProfileRowEmoji}>{item.icon}</Text>
-                      </View>
-                      <Text style={[styles.makeProfileRowLabel, { color: theme.textPrimary }]}>{item.label}</Text>
-                      {item.detail ? (
-                        <Text style={[styles.makeProfileRowDetail, { color: theme.textSecondary }]}>{item.detail}</Text>
-                      ) : null}
-                      {item.toggle ? (
-                        <Switch
-                          value={'value' in item ? item.value : false}
-                          onValueChange={undefined}
-                          trackColor={{ false: theme.border, true: theme.primary }}
-                          thumbColor="#FFFFFF"
-                        />
-                      ) : (
-                        <Text style={[styles.makeProfileChevron, { color: theme.textSecondary }]}>›</Text>
-                      )}
-                    </Pressable>
-                  ))}
-                </View>
+
+            <View style={styles.profileStatsRow}>
+              <View style={[styles.profileStatCard, nestSurface]}>
+                <AccessibleText style={[styles.profileStatValue, { color: theme.textPrimary }]}>
+                  {String(laundryCount)}
+                </AccessibleText>
+                <AccessibleText style={[styles.profileStatLabel, { color: theme.textMuted }]}>Fua orders</AccessibleText>
               </View>
-            ))}
-            <View style={styles.makeProfileSection}>
-              <MakeLabel darkMode={themeMode === 'dark'}>Appearance</MakeLabel>
-              <Text style={[styles.themePreferenceHint, { color: theme.textSecondary }]}>
-                Currently {themePreferenceLabel.toLowerCase()}
-              </Text>
-              <View style={styles.themePreferenceRow}>
-                {(
-                  [
-                    { key: 'system' as const, label: 'System' },
-                    { key: 'light' as const, label: 'Light' },
-                    { key: 'dark' as const, label: 'Dark' },
-                  ] as const
-                ).map((opt) => {
-                  const on = themePreference === opt.key;
-                  return (
-                    <Pressable
-                      key={opt.key}
-                      style={[
-                        styles.themePreferenceChip,
-                        { borderColor: theme.border, backgroundColor: theme.sheet },
-                        on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
-                      ]}
-                      onPress={() => setThemePreference(opt.key)}
-                    >
-                      <Text
-                        style={[
-                          styles.themePreferenceChipText,
-                          { color: theme.textSecondary },
-                          on && { color: theme.primary },
-                        ]}
-                      >
-                        {opt.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
+              <View style={[styles.profileStatCard, nestSurface]}>
+                <AccessibleText style={[styles.profileStatValue, { color: theme.textPrimary }]} numberOfLines={1}>
+                  {memberSince}
+                </AccessibleText>
+                <AccessibleText style={[styles.profileStatLabel, { color: theme.textMuted }]}>Member</AccessibleText>
               </View>
+              <PressableScale
+                style={[styles.profileStatCard, nestSurface]}
+                onPress={() => {
+                  HapticMap.light();
+                  setActiveTab('home');
+                  setActiveSegment('bnbs');
+                  setActiveService('bnbs');
+                  setHomeSheetStageAnimated('mid');
+                }}
+              >
+                <AccessibleText style={[styles.profileStatValue, { color: theme.primary }]} numberOfLines={1}>
+                  {rentalSubscriptionActive ? 'Active' : 'Plans'}
+                </AccessibleText>
+                <AccessibleText style={[styles.profileStatLabel, { color: theme.textMuted }]}>Keja</AccessibleText>
+              </PressableScale>
             </View>
-            <View style={[styles.makeMpesaRow, { backgroundColor: theme.sheet, borderColor: theme.border }]}>
-              <View style={styles.makeMpesaRowInner}>
-                <View style={styles.mpesaIcon}>
-                  <Text style={styles.mpesaIconText}>M</Text>
+
+            <View style={[styles.profileGroup, nestSurface]}>
+              <PressableScale
+                style={styles.profileRow}
+                onPress={() => {
+                  HapticMap.light();
+                  setActiveTab('activity');
+                  setActivitySection('active');
+                }}
+              >
+                <View style={[styles.profileRowIcon, { backgroundColor: theme.mutedSurface }]}>
+                  <AppIcon name="bell" size={18} color={theme.textSecondary} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={[styles.mpesaTitle, { color: theme.textPrimary }]}>M-Pesa</Text>
-                  <Text style={[styles.mpesaSub, { color: theme.textSecondary }]}>07XX *** 456 · Default</Text>
+                  <AccessibleText style={[styles.makeProfileRowLabel, { color: theme.textPrimary }]}>
+                    Activity
+                  </AccessibleText>
+                  <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                    Orders & updates
+                  </AccessibleText>
                 </View>
-                <Text style={[styles.makeProfileChevron, { color: theme.textSecondary }]}>›</Text>
+                <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+              </PressableScale>
+              <View style={[styles.profileRowDivider, { backgroundColor: theme.border }]} />
+              <View style={styles.profileRow}>
+                <View style={[styles.profileRowIcon, { backgroundColor: theme.mutedSurface }]}>
+                  <AppIcon name="card" size={18} color={theme.textSecondary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <AccessibleText style={[styles.makeProfileRowLabel, { color: theme.textPrimary }]}>
+                    M-Pesa
+                  </AccessibleText>
+                  <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
+                    Default payment
+                  </AccessibleText>
+                </View>
               </View>
             </View>
-            <Pressable style={[styles.makeLogoutBtn, { borderColor: theme.border }]}>
-              <Text style={[styles.makeLogoutText, { color: theme.textSecondary }]}>↪ Log out</Text>
-            </Pressable>
-            <Text style={[styles.makeVersion, { color: theme.textSecondary }]}>Jua X · v1.0.0-mvp</Text>
+
+            <AccessibleText style={[styles.profileSectionLabel, { color: theme.textMuted }]}>
+              Appearance
+            </AccessibleText>
+            <View style={styles.themePreferenceRow}>
+              {(
+                [
+                  { key: 'system' as const, label: 'System', icon: 'phone-portrait-outline' as const },
+                  { key: 'light' as const, label: 'Light', icon: 'sunny-outline' as const },
+                  { key: 'dark' as const, label: 'Dark', icon: 'moon-outline' as const },
+                ] as const
+              ).map((opt) => {
+                const on = themePreference === opt.key;
+                const tint = on ? theme.primary : theme.textSecondary;
+                return (
+                  <PressableScale
+                    key={opt.key}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: on }}
+                    accessibilityLabel={chipLabel(opt.label, on)}
+                    style={[
+                      styles.themePreferenceChip,
+                      nestSurface,
+                      on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
+                    ]}
+                    onPress={() => {
+                      HapticMap.selection();
+                      setThemePreference(opt.key);
+                    }}
+                  >
+                    <View
+                      style={[
+                        styles.themePreferenceIconWell,
+                        { backgroundColor: on ? `${theme.primary}22` : theme.mutedSurface },
+                      ]}
+                    >
+                      <Ionicons name={opt.icon} size={18} color={tint} />
+                    </View>
+                    <AccessibleText
+                      style={[styles.themePreferenceChipText, { color: tint }]}
+                      numberOfLines={1}
+                    >
+                      {opt.label}
+                    </AccessibleText>
+                  </PressableScale>
+                );
+              })}
+            </View>
+
+            <View style={[styles.profileGroup, nestSurface, { marginTop: 16 }]}>
+              <PressableScale style={styles.profileRow} onPress={() => {}}>
+                <View style={[styles.profileRowIcon, { backgroundColor: theme.mutedSurface }]}>
+                  <AppIcon name="help" size={18} color={theme.textSecondary} />
+                </View>
+                <AccessibleText style={[styles.makeProfileRowLabel, { color: theme.textPrimary, flex: 1 }]}>
+                  Help & support
+                </AccessibleText>
+                <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+              </PressableScale>
+              <View style={[styles.profileRowDivider, { backgroundColor: theme.border }]} />
+              <PressableScale
+                style={styles.profileRow}
+                onPress={() => {
+                  HapticMap.light();
+                  void signOut();
+                }}
+              >
+                <View style={[styles.profileRowIcon, { backgroundColor: `${Colors.light.error}18` }]}>
+                  <Ionicons name="log-out-outline" size={18} color={Colors.light.error} />
+                </View>
+                <AccessibleText style={[styles.makeProfileRowLabel, { color: Colors.light.error, flex: 1 }]}>
+                  Sign out
+                </AccessibleText>
+              </PressableScale>
+            </View>
+
+            <AccessibleText style={[styles.makeVersion, { color: theme.textMuted, marginTop: 20 }]}>
+              Jua X · v1.0.0
+            </AccessibleText>
           </>
+        );
+      }
+
+      if (isComingSoonSegment) {
+        const info = COMING_SOON_SERVICE_INFO[activeSegment];
+        const watermarkColor = themeMode === 'dark' ? 'rgba(255,255,255,0.05)' : `${info.tint}14`;
+        return (
+          <View style={styles.comingSoonSheetRoot}>
+            <View style={styles.comingSoonWatermark} pointerEvents="none" accessibilityElementsHidden>
+              <AppIcon name={info.icon} size={168} color={watermarkColor} />
+            </View>
+
+            <View style={styles.comingSoonHeaderBlock}>
+              <AccessibleText style={[styles.comingSoonTitle, { color: theme.textPrimary }]}>
+                {info.title}
+              </AccessibleText>
+              <AccessibleText style={[styles.comingSoonSubtitle, { color: theme.textSecondary }]}>
+                {info.lead}
+              </AccessibleText>
+            </View>
+
+            {renderSectionHero(comingSoonHeroSlides(activeSegment), `How ${info.title} will work`, 220)}
+            <View style={[styles.comingSoonEmojiBanner, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
+              <Text style={[styles.comingSoonEmojiBannerText, { color: theme.primary }]}>
+                Coming soon
+              </Text>
+            </View>
+            <Text style={[styles.juxSectionLabel, styles.valetSectionLabelSpaced]}>What to expect</Text>
+            {info.features.map((line) => (
+              <View key={line} style={styles.juxListingBulletRow}>
+                <Text style={styles.juxListingBulletGlyph}>●</Text>
+                <Text style={[styles.juxListingBulletText, { color: theme.textPrimary }]}>{line}</Text>
+              </View>
+            ))}
+            <Text style={[styles.comingSoonMore, { color: theme.textMuted }]}>
+              More services on the way — Jua X is building your everyday super-app.
+            </Text>
+          </View>
         );
       }
 
@@ -6310,10 +7360,8 @@ export default function App() {
         return (
           <HomeHub
             slides={HOME_HERO_SLIDES}
-            carouselHint="Swipe for more · switch services with the bar above"
+            carouselHint="Swipe to explore"
             cardWidth={heroCardWidth}
-            locationLabel={locationLoading ? 'Locating…' : currentLocationLabel}
-            county={countyDisplayLabel}
             darkMode={themeMode === 'dark'}
             activeTripCount={activeHubTripCount}
             listingsLoading={listingsInitialLoading}
@@ -6334,6 +7382,8 @@ export default function App() {
             nearbyRadiusKm={staysRadiusKm}
             hasLocation={!!currentCoords || !!listingsCounty}
             locationLoading={locationLoading}
+            onPopularCarouselTouchStart={() => setHomeHubCarouselActive(true)}
+            onPopularCarouselTouchEnd={() => setHomeHubCarouselActive(false)}
             onBrowseListings={() => {
               setActiveSegment('bnbs');
               setActiveService('bnbs');
@@ -6350,6 +7400,7 @@ export default function App() {
               setActiveSegment(service === 'movers' ? 'movers' : 'rides');
               setHomeSheetStageAnimated('mid');
             }}
+            onOpenMore={() => setMoreServicesOpen(true)}
             onOpenStay={(id) => {
               setSelectedBnbId(id);
               setSelectedHouseId(null);
@@ -6706,7 +7757,7 @@ export default function App() {
                     .filter((t) => selectedMamaFuaTasks.includes(t.id))
                     .map((t) => t.label)
                     .join(', ')
-                : 'Select tasks below'
+                : 'No tasks yet'
               : laundryMeasureMode === 'kg'
                 ? `${laundryQuantity} kg`
                 : `${laundryItemCount} items`;
@@ -6715,314 +7766,469 @@ export default function App() {
           const pickupLabel = mamafuaMode
             ? 'Mama Fua visit'
             : stationMode && laundryStationId
-              ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Station'
+              ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Hub'
               : 'Your door';
           const pickupDetail = mamafuaMode
-            ? 'Rider delivers Mama Fua with cleaning kit'
+            ? pickupDisplayLabel
             : stationMode && laundryStationId
               ? pickupStations.find((s) => s.id === laundryStationId)?.subtitle ?? pickupDisplayLabel
               : pickupDisplayLabel;
           const bookingIndex = FUA_WIZARD_BOOKING_ORDER.indexOf(laundryWizardStep);
           const stepCopy = fuaStepCopy(laundryPickupMode, laundryWizardStep);
+          const visibleFuaHubs = nearbyStations.slice(0, 4);
+          const nestSurface = nestedChrome(themeMode === 'dark');
+          const watermarkColor = themeMode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(232,90,28,0.07)';
           return (
-            <>
+            <View style={styles.fuaSheetRoot}>
+              <View style={styles.fuaWatermark} pointerEvents="none" accessibilityElementsHidden>
+                <AppIcon name="washer" size={168} color={watermarkColor} />
+              </View>
+
               {FUA_WIZARD_BOOKING_ORDER.includes(laundryWizardStep) ? (
-                <>
-                  <Text style={[styles.rideWizardStepMeta, { color: theme.textMuted }]}>
-                    Step {bookingIndex + 1} of {FUA_WIZARD_BOOKING.length}
-                  </Text>
-                  <View style={styles.rideWizardProgress}>
+                <View style={styles.fuaHeaderBlock}>
+                  <View style={styles.fuaDots} accessibilityRole="progressbar">
                     {FUA_WIZARD_BOOKING.map((step, i) => (
                       <View
                         key={step.key}
                         style={[
-                          styles.rideWizardProgressSeg,
+                          styles.fuaDot,
                           { backgroundColor: theme.border },
                           i <= bookingIndex && { backgroundColor: theme.primary },
                         ]}
                       />
                     ))}
                   </View>
-                  <Text style={[styles.rideWizardTitle, { color: theme.textPrimary }]}>{stepCopy.title}</Text>
-                  <Text style={[styles.rideWizardSubtitle, { color: theme.textSecondary }]}>{stepCopy.subtitle}</Text>
-                </>
+                  <AccessibleText style={[styles.fuaTitle, { color: theme.textPrimary }]}>
+                    {stepCopy.title}
+                  </AccessibleText>
+                  <AccessibleText style={[styles.fuaSubtitle, { color: theme.textSecondary }]}>
+                    {stepCopy.subtitle}
+                  </AccessibleText>
+                </View>
               ) : null}
+
               {laundryWizardStep === 'pickup' ? (
                 <>
-                  <View style={styles.valetSegmentTrack}>
-                    <Pressable
-                      style={[styles.valetSegment, laundryPickupMode !== 'mamafua' && styles.valetSegmentActive]}
+                  <View style={styles.fuaServiceChoiceRow}>
+                    <PressableScale
+                      accessibilityRole="button"
+                      accessibilityLabel={chipLabel('Laundry', !mamafuaMode)}
+                      accessibilityState={{ selected: !mamafuaMode }}
+                      style={[
+                        styles.fuaServiceChoiceCard,
+                        nestSurface,
+                        !mamafuaMode && styles.fuaServiceChoiceCardOn,
+                      ]}
                       onPress={() => {
+                        HapticMap.selection();
                         setLaundryPickupMode('door');
                         setLaundryStationId(null);
+                        setFuaShowHubs(false);
                       }}
                     >
-                      <Text
+                      <View
                         style={[
-                          styles.valetSegmentText,
-                          laundryPickupMode !== 'mamafua' && styles.valetSegmentTextActive,
+                          styles.fuaChoiceIconWell,
+                          { backgroundColor: !mamafuaMode ? `${theme.primary}22` : theme.mutedSurface },
                         ]}
                       >
+                        <AppIcon
+                          name="washer"
+                          size={26}
+                          color={!mamafuaMode ? theme.primary : theme.textSecondary}
+                        />
+                      </View>
+                      <AccessibleText
+                        style={[
+                          styles.fuaServiceChoiceTitle,
+                          { color: !mamafuaMode ? theme.primary : theme.textPrimary },
+                        ]}
+                      >
+                        Laundry
+                      </AccessibleText>
+                      <AccessibleText style={[styles.fuaServiceChoiceSub, { color: theme.textSecondary }]}>
                         Wash & fold
-                      </Text>
-                    </Pressable>
-                    <View style={styles.valetSegmentDivider} />
-                    <Pressable
-                      style={[styles.valetSegment, mamafuaMode && styles.valetSegmentActive]}
+                      </AccessibleText>
+                    </PressableScale>
+                    <PressableScale
+                      accessibilityRole="button"
+                      accessibilityLabel={chipLabel('Mama Fua', mamafuaMode)}
+                      accessibilityState={{ selected: mamafuaMode }}
+                      style={[
+                        styles.fuaServiceChoiceCard,
+                        nestSurface,
+                        mamafuaMode && styles.fuaServiceChoiceCardOn,
+                      ]}
                       onPress={() => {
+                        HapticMap.selection();
                         setLaundryPickupMode('mamafua');
                         setLaundryStationId(null);
+                        setFuaShowHubs(false);
                       }}
                     >
-                      <Text style={[styles.valetSegmentText, mamafuaMode && styles.valetSegmentTextActive]}>
+                      <View
+                        style={[
+                          styles.fuaChoiceIconWell,
+                          { backgroundColor: mamafuaMode ? `${theme.primary}22` : theme.mutedSurface },
+                        ]}
+                      >
+                        <AppIcon
+                          name="mamafua"
+                          size={26}
+                          color={mamafuaMode ? theme.primary : theme.textSecondary}
+                        />
+                      </View>
+                      <AccessibleText
+                        style={[
+                          styles.fuaServiceChoiceTitle,
+                          { color: mamafuaMode ? theme.primary : theme.textPrimary },
+                        ]}
+                      >
                         Mama Fua
-                      </Text>
-                    </Pressable>
+                      </AccessibleText>
+                      <AccessibleText style={[styles.fuaServiceChoiceSub, { color: theme.textSecondary }]}>
+                        Home clean
+                      </AccessibleText>
+                    </PressableScale>
                   </View>
-                      <Text style={[styles.juxHintMuted, { marginTop: 8, marginBottom: 4, color: theme.textSecondary }]}>
-                    {mamafuaMode
-                      ? 'Cleaner visits your home with equipment.'
-                      : 'We pick up clothes and return them clean.'}
-                  </Text>
+
+                  <PressableScale
+                    style={[styles.fuaLocationCard, nestSurface]}
+                    onPress={() => {
+                      HapticMap.light();
+                      void fetchCurrentLocation();
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Update location"
+                  >
+                    <AppIcon name="location" size={18} color={theme.primary} />
+                    <View style={styles.fuaLocationBody}>
+                      <AccessibleText style={[styles.fuaLocationLabel, { color: theme.textMuted }]}>
+                        {mamafuaMode ? 'Your home' : stationMode ? 'Drop-off hub' : 'We pick up here'}
+                      </AccessibleText>
+                      <AccessibleText
+                        style={[styles.fuaLocationValue, { color: theme.textPrimary }]}
+                        numberOfLines={2}
+                      >
+                        {stationMode
+                          ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Hub'
+                          : pickupDisplayLabel}
+                      </AccessibleText>
+                    </View>
+                    <AccessibleText style={[styles.fuaLocationAction, { color: theme.primary }]}>
+                      {locationLoading ? '…' : '↻'}
+                    </AccessibleText>
+                  </PressableScale>
+
                   {mamafuaMode ? (
                     <>
-                      <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                        <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Home address</Text>
-                        <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]} numberOfLines={2}>
-                          {pickupDisplayLabel}
-                        </Text>
-                        <Pressable onPress={() => void fetchCurrentLocation()} hitSlop={8}>
-                          <Text style={[styles.rideWizardReviewSub, { color: theme.primary }]}>
-                            {locationLoading ? 'Updating location…' : 'Update my location'}
-                          </Text>
-                        </Pressable>
-                      </View>
-                      <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>When works for you?</Text>
-                      <View style={styles.valetSegmentTrack}>
-                        {mamafuaWhenOptions.map((band, wi) => (
-                          <Fragment key={band.id}>
-                            {wi > 0 ? <View style={styles.valetSegmentDivider} /> : null}
-                            <Pressable
-                              style={[styles.valetSegment, valetStudioWhen === band.id && styles.valetSegmentActive]}
-                              onPress={() => setValetStudioWhen(band.id)}
+                      <View style={styles.fuaWhenRow}>
+                        {mamafuaWhenOptions.map((band) => {
+                          const on = valetStudioWhen === band.id;
+                          return (
+                            <PressableScale
+                              key={band.id}
+                              accessibilityRole="button"
+                              accessibilityLabel={chipLabel(band.label, on)}
+                              accessibilityState={{ selected: on }}
+                              style={[
+                                styles.fuaWhenChip,
+                                nestSurface,
+                                on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
+                              ]}
+                              onPress={() => {
+                                HapticMap.selection();
+                                setValetStudioWhen(band.id);
+                              }}
                             >
-                              <Text
-                                style={[styles.valetSegmentText, valetStudioWhen === band.id && styles.valetSegmentTextActive]}
+                              <AccessibleText
+                                style={[
+                                  styles.fuaWhenChipText,
+                                  { color: on ? theme.primary : theme.textPrimary },
+                                ]}
                               >
                                 {band.label}
-                              </Text>
-                            </Pressable>
-                          </Fragment>
-                        ))}
+                              </AccessibleText>
+                            </PressableScale>
+                          );
+                        })}
                       </View>
-                      <Text style={[styles.juxSectionLabel, styles.homeDeepFilterSpaced]}>Notes for Mama Fua</Text>
                       <TextInput
                         value={valetStudioNotes}
                         onChangeText={setValetStudioNotes}
-                        placeholder="Gate code, floor, water tap, pets…"
+                        placeholder="Optional notes (gate, floor…)"
                         placeholderTextColor={theme.textMuted}
                         multiline
-                        style={[styles.homeDeepNotes, { borderColor: theme.border, color: theme.textPrimary }]}
+                        accessibilityLabel="Optional notes"
+                        style={[styles.fuaNotesInput, nestSurface, { color: theme.textPrimary, borderColor: theme.border }]}
                       />
-                      <Text style={[styles.juxHintMuted, { marginTop: 8 }]}>
-                        No drop-off hub — the rider brings Mama Fua and everything needed to your door.
-                      </Text>
                     </>
                   ) : (
                     <>
-                      {stationMode && laundryStationId ? (
-                        <View style={[styles.rideWizardReviewRow, { borderColor: theme.border, marginTop: 8 }]}>
-                          <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>Drop-off hub</Text>
-                          <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]} numberOfLines={2}>
-                            {pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Hub'}
-                          </Text>
-                          <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]} numberOfLines={2}>
-                            {pickupDetail}
-                          </Text>
-                          <Pressable onPress={() => setLaundryStationId(null)} hitSlop={8}>
-                            <Text style={[styles.rideWizardReviewSub, { color: theme.primary }]}>Use door pickup instead</Text>
-                          </Pressable>
-                        </View>
+                      {stationMode ? (
+                        <Pressable
+                          onPress={() => {
+                            HapticMap.selection();
+                            setLaundryStationId(null);
+                            setLaundryPickupMode('door');
+                            setFuaShowHubs(false);
+                          }}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel="Switch back to door pickup"
+                        >
+                          <AccessibleText style={[styles.fuaInlineLink, { color: theme.primary }]}>
+                            Switch to door pickup
+                          </AccessibleText>
+                        </Pressable>
                       ) : (
-                        <Text style={[styles.valetAddressCompact, { color: theme.textPrimary }]} numberOfLines={2}>
-                          {pickupDisplayLabel}
-                        </Text>
+                        <Pressable
+                          onPress={() => {
+                            HapticMap.selection();
+                            setFuaShowHubs((v) => !v);
+                          }}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel={fuaShowHubs ? 'Hide hubs' : 'Drop at a hub instead'}
+                        >
+                          <AccessibleText style={[styles.fuaInlineLink, { color: theme.primary }]}>
+                            {fuaShowHubs ? 'Hide hubs' : 'Drop at a hub instead ›'}
+                          </AccessibleText>
+                        </Pressable>
                       )}
-                      <Pressable
-                        style={styles.homeDeepEntryRow}
-                        onPress={() => {
-                          setHomeSheetStageAnimated('collapsed');
-                          setHomeDeepPage('service-map');
-                        }}
-                      >
-                        <Text style={[styles.homeDeepEntryTitle, { color: theme.primary }]}>
-                          Find a drop-off hub on map ›
-                        </Text>
-                        <Text style={[styles.homeDeepEntrySub, { color: theme.textSecondary }]}>
-                          Tap a hub pin — optional for wash & fold
-                        </Text>
-                      </Pressable>
+
+                      {(fuaShowHubs || stationMode) && visibleFuaHubs.length > 0 ? (
+                        <CarouselZone>
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            style={styles.fuaStationScroll}
+                            contentContainerStyle={{ paddingRight: 8 }}
+                          >
+                            {visibleFuaHubs.map((hub) => {
+                              const on = laundryStationId === hub.id;
+                              return (
+                                <PressableScale
+                                  key={hub.id}
+                                  accessibilityRole="button"
+                                  accessibilityLabel={chipLabel(hub.name, on)}
+                                  accessibilityState={{ selected: on }}
+                                  onPress={() => {
+                                    HapticMap.selection();
+                                    setLaundryPickupMode('station');
+                                    setLaundryStationId(hub.id);
+                                  }}
+                                  style={[
+                                    styles.fuaStationChip,
+                                    nestSurface,
+                                    { borderColor: theme.border },
+                                    on && styles.fuaStationChipOn,
+                                  ]}
+                                >
+                                  <AccessibleText
+                                    style={[styles.fuaStationChipText, on && styles.fuaStationChipTextOn]}
+                                    numberOfLines={1}
+                                  >
+                                    {hub.name}
+                                  </AccessibleText>
+                                </PressableScale>
+                              );
+                            })}
+                            <PressableScale
+                              style={[styles.fuaStationChip, nestSurface, { borderColor: theme.border }]}
+                              onPress={() => {
+                                HapticMap.light();
+                                setHomeSheetStageAnimated('collapsed');
+                                setHomeDeepPage('service-map');
+                              }}
+                              accessibilityRole="button"
+                              accessibilityLabel="Open map for more hubs"
+                            >
+                              <AccessibleText style={[styles.fuaStationChipText, { color: theme.primary }]}>
+                                Map ›
+                              </AccessibleText>
+                            </PressableScale>
+                          </ScrollView>
+                        </CarouselZone>
+                      ) : null}
                     </>
                   )}
                 </>
               ) : null}
+
               {laundryWizardStep === 'load' ? (
                 <>
                   {mamafuaMode ? (
                     <>
-                      <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
-                        Pick on-site tasks — a rider delivers Mama Fua with equipment (KES {mamaFuaDispatchFee} dispatch).
-                      </Text>
                       {mamaFuaTasks.map((task) => {
                         const on = selectedMamaFuaTasks.includes(task.id);
                         return (
-                          <Pressable
+                          <PressableScale
                             key={task.id}
-                            style={[styles.listingCatRow, styles.homeDeepToggleRow, on && { borderColor: theme.primary }]}
-                            onPress={() =>
+                            accessibilityRole="checkbox"
+                            accessibilityLabel={chipLabel(`${task.label}, KES ${task.priceKes}`, on)}
+                            accessibilityState={{ checked: on }}
+                            style={[
+                              styles.fuaTaskRow,
+                              nestSurface,
+                              on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
+                            ]}
+                            onPress={() => {
+                              HapticMap.selection();
                               setSelectedMamaFuaTasks((prev) =>
                                 on ? prev.filter((id) => id !== task.id) : [...prev, task.id],
-                              )
-                            }
+                              );
+                            }}
                           >
-                            <View style={styles.listingCatBody}>
-                              <Text style={styles.listingCatTitle}>{task.label}</Text>
-                              <Text style={styles.listingCatMeta}>{task.description} · KES {task.priceKes}</Text>
-                            </View>
-                            <Text style={styles.valetStationCheck}>{on ? '✓' : ''}</Text>
-                          </Pressable>
+                            <AccessibleText style={[styles.fuaTaskLabel, { color: theme.textPrimary }]}>
+                              {task.label}
+                            </AccessibleText>
+                            <AccessibleText style={[styles.fuaTaskPrice, { color: theme.textSecondary }]}>
+                              KES {task.priceKes}
+                            </AccessibleText>
+                            <AccessibleText
+                              style={[styles.fuaTaskCheck, { color: on ? theme.primary : 'transparent' }]}
+                            >
+                              ✓
+                            </AccessibleText>
+                          </PressableScale>
                         );
                       })}
                       {selectedMamaFuaTasks.includes('laundry') ? (
-                        <View style={[styles.valetStepperCompact, { marginTop: 12 }]}>
+                        <View style={[styles.valetStepperCompact, nestSurface, { marginTop: 8 }]}>
                           <Pressable
                             style={styles.valetStepperBtn}
-                            onPress={() => setLaundryQuantity((q) => Math.max(1, q - 1))}
+                            accessibilityRole="button"
+                            accessibilityLabel="Decrease kilograms"
+                            onPress={() => {
+                              HapticMap.selection();
+                              setLaundryQuantity((q) => Math.max(1, q - 1));
+                            }}
                           >
-                            <Text style={styles.valetStepperBtnText}>−</Text>
+                            <AccessibleText style={styles.valetStepperBtnText}>−</AccessibleText>
                           </Pressable>
-                          <Text style={styles.valetStepperValue}>{laundryQuantity} kg laundry</Text>
+                          <AccessibleText style={[styles.valetStepperValue, { color: theme.textPrimary }]}>
+                            {laundryQuantity} kg
+                          </AccessibleText>
                           <Pressable
                             style={styles.valetStepperBtn}
-                            onPress={() => setLaundryQuantity((q) => Math.min(30, q + 1))}
+                            accessibilityRole="button"
+                            accessibilityLabel="Increase kilograms"
+                            onPress={() => {
+                              HapticMap.selection();
+                              setLaundryQuantity((q) => Math.min(30, q + 1));
+                            }}
                           >
-                            <Text style={styles.valetStepperBtnText}>+</Text>
+                            <AccessibleText style={styles.valetStepperBtnText}>+</AccessibleText>
                           </Pressable>
                         </View>
                       ) : null}
                     </>
                   ) : (
                     <>
-                      <View style={styles.valetSegmentTrack}>
-                        <Pressable
-                          style={[styles.valetSegment, laundryMeasureMode === 'kg' && styles.valetSegmentActive]}
-                          onPress={() => setLaundryMeasureMode('kg')}
-                        >
-                          <Text style={[styles.valetSegmentText, laundryMeasureMode === 'kg' && styles.valetSegmentTextActive]}>
-                            By kg
-                          </Text>
-                        </Pressable>
-                        <View style={styles.valetSegmentDivider} />
-                        <Pressable
-                          style={[styles.valetSegment, laundryMeasureMode === 'items' && styles.valetSegmentActive]}
-                          onPress={() => setLaundryMeasureMode('items')}
-                        >
-                          <Text
-                            style={[styles.valetSegmentText, laundryMeasureMode === 'items' && styles.valetSegmentTextActive]}
+                      <View style={[styles.fuaLoadCard, nestSurface]}>
+                        <View style={styles.valetStepperCompact}>
+                          <Pressable
+                            style={styles.valetStepperBtn}
+                            accessibilityRole="button"
+                            accessibilityLabel="Decrease load"
+                            onPress={() => {
+                              HapticMap.selection();
+                              if (laundryMeasureMode === 'kg') {
+                                setLaundryQuantity((q) => Math.max(1, q - 1));
+                              } else {
+                                setLaundryItemCount((n) => Math.max(1, n - 1));
+                              }
+                            }}
                           >
-                            By items
-                          </Text>
-                        </Pressable>
-                      </View>
-                      <Text style={[styles.juxHintMuted, { marginBottom: 12 }]}>
-                        {laundryMeasureMode === 'kg'
-                          ? 'Typical load: 3–6 kg for one person · 8–12 kg for a family'
-                          : 'Count shirts, trousers, bedsheets — we will weigh at pickup if needed'}
-                      </Text>
-                      <View style={styles.valetStepperCompact}>
+                            <AccessibleText style={styles.valetStepperBtnText}>−</AccessibleText>
+                          </Pressable>
+                          <View style={styles.fuaLoadCenter}>
+                            <AccessibleText style={[styles.fuaLoadValue, { color: theme.textPrimary }]}>
+                              {loadSummary}
+                            </AccessibleText>
+                            <AccessibleText style={[styles.fuaLoadHint, { color: theme.textMuted }]}>
+                              {laundryMeasureMode === 'kg' ? 'About a bag or two' : 'Rough count is fine'}
+                            </AccessibleText>
+                          </View>
+                          <Pressable
+                            style={styles.valetStepperBtn}
+                            accessibilityRole="button"
+                            accessibilityLabel="Increase load"
+                            onPress={() => {
+                              HapticMap.selection();
+                              if (laundryMeasureMode === 'kg') {
+                                setLaundryQuantity((q) => Math.min(30, q + 1));
+                              } else {
+                                setLaundryItemCount((n) => Math.min(45, n + 1));
+                              }
+                            }}
+                          >
+                            <AccessibleText style={styles.valetStepperBtnText}>+</AccessibleText>
+                          </Pressable>
+                        </View>
                         <Pressable
-                          style={styles.valetStepperBtn}
-                          onPress={() =>
-                            laundryMeasureMode === 'kg'
-                              ? setLaundryQuantity((q) => Math.max(1, q - 1))
-                              : setLaundryItemCount((n) => Math.max(1, n - 1))
+                          onPress={() => {
+                            HapticMap.selection();
+                            setLaundryMeasureMode((m) => (m === 'kg' ? 'items' : 'kg'));
+                          }}
+                          hitSlop={8}
+                          accessibilityRole="button"
+                          accessibilityLabel={
+                            laundryMeasureMode === 'kg' ? 'Switch to item count' : 'Switch to kilograms'
                           }
                         >
-                          <Text style={styles.valetStepperBtnText}>−</Text>
-                        </Pressable>
-                        <Text style={styles.valetStepperValue}>{loadSummary}</Text>
-                        <Pressable
-                          style={styles.valetStepperBtn}
-                          onPress={() =>
-                            laundryMeasureMode === 'kg'
-                              ? setLaundryQuantity((q) => Math.min(30, q + 1))
-                              : setLaundryItemCount((n) => Math.min(45, n + 1))
-                          }
-                        >
-                          <Text style={styles.valetStepperBtnText}>+</Text>
+                          <AccessibleText style={[styles.fuaInlineLink, { color: theme.primary, textAlign: 'center' }]}>
+                            {laundryMeasureMode === 'kg' ? 'Count by items instead' : 'Switch to kg'}
+                          </AccessibleText>
                         </Pressable>
                       </View>
-                      <View style={[styles.rideWizardFareCard, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
-                        <Text style={[styles.rideWizardFareLabel, { color: theme.textSecondary }]}>Estimated total</Text>
-                        <Text style={[styles.rideWizardFareValue, { color: theme.textPrimary }]}>KES {laundryEstimateKes}</Text>
+                      <View
+                        style={[
+                          styles.rideWizardFareCard,
+                          { backgroundColor: theme.primaryLight, borderColor: theme.primary },
+                        ]}
+                      >
+                        <AccessibleText style={[styles.rideWizardFareLabel, { color: theme.textSecondary }]}>
+                          Estimate
+                        </AccessibleText>
+                        <AccessibleText style={[styles.rideWizardFareValue, { color: theme.textPrimary }]}>
+                          KES {laundryEstimateKes}
+                        </AccessibleText>
                       </View>
                     </>
                   )}
                 </>
               ) : null}
+
               {laundryWizardStep === 'review' ? (
-                <>
-                  <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>
-                      {mamafuaMode ? 'Visit' : 'Pickup'}
-                    </Text>
-                    <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>{pickupLabel}</Text>
-                    <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]} numberOfLines={2}>
-                      {pickupDetail}
-                    </Text>
-                  </View>
+                <View style={[styles.fuaReceipt, nestSurface, { borderColor: theme.border }]}>
+                  <AccessibleText style={[styles.fuaReceiptLine, { color: theme.textPrimary }]}>
+                    {pickupLabel}
+                  </AccessibleText>
+                  <AccessibleText style={[styles.fuaReceiptMeta, { color: theme.textSecondary }]} numberOfLines={2}>
+                    {pickupDetail}
+                  </AccessibleText>
                   {mamafuaMode ? (
-                    <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                      <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>When</Text>
-                      <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>
-                        {fuaWhenLabel(valetStudioWhen, mamafuaWhenOptions)}
-                      </Text>
-                      {valetStudioNotes.trim() ? (
-                        <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]} numberOfLines={2}>
-                          {valetStudioNotes.trim()}
-                        </Text>
-                      ) : null}
-                    </View>
+                    <AccessibleText style={[styles.fuaReceiptMeta, { color: theme.textSecondary }]}>
+                      {fuaWhenLabel(valetStudioWhen, mamafuaWhenOptions)}
+                      {valetStudioNotes.trim() ? ` · ${valetStudioNotes.trim()}` : ''}
+                    </AccessibleText>
                   ) : null}
-                  <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>
-                      {mamafuaMode ? 'Tasks' : 'Load'}
-                    </Text>
-                    <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>{loadSummary}</Text>
-                    <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]}>
-                      {mamafuaMode
-                        ? `Rider dispatch KES ${mamaFuaDispatchFee} + selected jobs`
-                        : laundryMeasureMode === 'kg'
-                          ? 'Charged per kg · washed, folded & delivered'
-                          : 'Charged per item · washed, folded & delivered'}
-                    </Text>
+                  <AccessibleText style={[styles.fuaReceiptMeta, { color: theme.textSecondary }]}>
+                    {loadSummary}
+                  </AccessibleText>
+                  <View style={[styles.fuaReceiptTotal, { borderTopColor: theme.border }]}>
+                    <AccessibleText style={[styles.fuaReceiptTotalLabel, { color: theme.textSecondary }]}>
+                      Total
+                    </AccessibleText>
+                    <AccessibleText style={[styles.fuaReceiptTotalValue, { color: theme.textPrimary }]}>
+                      KES {laundryEstimateKes}
+                    </AccessibleText>
                   </View>
-                  <View style={[styles.rideWizardReviewRow, { borderColor: theme.border }]}>
-                    <Text style={[styles.rideWizardReviewLabel, { color: theme.textMuted }]}>ETA</Text>
-                    <Text style={[styles.rideWizardReviewValue, { color: theme.textPrimary }]}>30–45 min</Text>
-                    <Text style={[styles.rideWizardReviewSub, { color: theme.textSecondary }]}>
-                      {mamafuaMode
-                        ? 'Rider delivers Mama Fua with kit — she works at your home'
-                        : 'Mama fua picks up, washes at a verified station, and returns to you'}
-                    </Text>
-                  </View>
-                  <View style={[styles.rideWizardFareCard, { backgroundColor: theme.primaryLight, borderColor: theme.primary }]}>
-                    <Text style={[styles.rideWizardFareLabel, { color: theme.textSecondary }]}>Total due</Text>
-                    <Text style={[styles.rideWizardFareValue, { color: theme.textPrimary }]}>KES {laundryEstimateKes}</Text>
-                  </View>
-                </>
+                </View>
               ) : null}
-            </>
+            </View>
           );
         }
         case 'bnbs':
@@ -7032,54 +8238,135 @@ export default function App() {
           const stayCount = isRental ? nearbyHouses.length : nearbyBnbs.length;
           const compactDetail = homeSheetStage !== 'full';
           const staysMapHeight =
-            homeSheetStage === 'full' ? 300 : homeSheetStage === 'mid' ? 228 : 188;
+            homeSheetStage === 'full' ? 280 : homeSheetStage === 'mid' ? 210 : 176;
+          const nestSurface = nestedChrome(themeMode === 'dark');
+          const watermarkColor = themeMode === 'dark' ? 'rgba(255,255,255,0.05)' : 'rgba(47,158,106,0.08)';
           return (
-            <>
-              <View style={styles.staysSubSegment}>
-                {(['bnb', 'rental'] as const).map((t) => {
-                  const on = (t === 'rental') === isRental;
-                  return (
-                    <Pressable
-                      key={t}
-                      style={[styles.staysSubSegmentBtn, on && styles.staysSubSegmentBtnOn]}
-                      onPress={() => setStaysSubTab(t)}
-                    >
-                      <Text style={[styles.staysSubSegmentText, on && styles.staysSubSegmentTextOn]}>
-                        {t === 'bnb' ? 'BnB' : 'Rental'}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
+            <View style={styles.kejaSheetRoot}>
+              <View style={styles.kejaWatermark} pointerEvents="none" accessibilityElementsHidden>
+                <AppIcon name="home" size={168} color={watermarkColor} />
               </View>
-              <Text style={styles.valetSheetLead}>
-                {listingsError
-                  ? listingsError
-                  : listingsInitialLoading
-                    ? 'Loading listings from server…'
-                    : isRental
-                      ? stayCount
-                        ? `Vacant rentals within ${staysRadiusKm} km. Exact pins unlock with subscription.`
-                        : listingsCounty
-                          ? `No rentals in ${staysRadiusKm} km — widen radius or browse all.`
-                          : 'Turn on location or set your county in profile to see nearby rentals.'
-                      : stayCount
-                        ? `Short stays near you — book to reveal the full address.`
-                        : listingsCounty
-                          ? `Nothing listed in ${countyDisplayLabel} yet.`
-                          : 'Turn on location or set your county in profile to see stays near you.'}
-              </Text>
-              <Text style={[styles.juxSectionLabel, styles.valetSectionLabelCompact]}>
-                {isRental ? 'Vacant nearby' : 'Stays nearby'}
-                {!dataLoading && listingsLoaded ? ` · ${staysRadiusKm} km` : ''}
-              </Text>
-              <View style={styles.staysSectionActionsRow}>
+
+              <View style={styles.kejaHeaderBlock}>
+                <AccessibleText style={[styles.kejaTitle, { color: theme.textPrimary }]}>Keja</AccessibleText>
+                <AccessibleText style={[styles.kejaSubtitle, { color: theme.textSecondary }]}>
+                  {listingsInitialLoading
+                    ? 'Finding places near you…'
+                    : stayCount
+                      ? `${stayCount} nearby · ${staysRadiusKm} km`
+                      : listingsCounty
+                        ? `Nothing nearby in ${countyDisplayLabel}`
+                        : 'Turn on location to see nearby'}
+                </AccessibleText>
+              </View>
+
+              <View style={styles.fuaServiceChoiceRow}>
+                <PressableScale
+                  accessibilityRole="button"
+                  accessibilityLabel={chipLabel('BnB', !isRental)}
+                  accessibilityState={{ selected: !isRental }}
+                  style={[
+                    styles.fuaServiceChoiceCard,
+                    nestSurface,
+                    !isRental && styles.fuaServiceChoiceCardOn,
+                  ]}
+                  onPress={() => {
+                    HapticMap.selection();
+                    setStaysSubTab('bnb');
+                  }}
+                >
+                  <View
+                    style={[
+                      styles.fuaChoiceIconWell,
+                      { backgroundColor: !isRental ? `${theme.primary}22` : theme.mutedSurface },
+                    ]}
+                  >
+                    <AppIcon name="stays" size={24} color={!isRental ? theme.primary : theme.textSecondary} />
+                  </View>
+                  <AccessibleText
+                    style={[
+                      styles.fuaServiceChoiceTitle,
+                      { color: !isRental ? theme.primary : theme.textPrimary },
+                    ]}
+                  >
+                    BnB
+                  </AccessibleText>
+                  <AccessibleText style={[styles.fuaServiceChoiceSub, { color: theme.textSecondary }]}>
+                    Short stays
+                  </AccessibleText>
+                </PressableScale>
+                <PressableScale
+                  accessibilityRole="button"
+                  accessibilityLabel={chipLabel('Rental', isRental)}
+                  accessibilityState={{ selected: isRental }}
+                  style={[
+                    styles.fuaServiceChoiceCard,
+                    nestSurface,
+                    isRental && styles.fuaServiceChoiceCardOn,
+                  ]}
+                  onPress={() => {
+                    HapticMap.selection();
+                    setStaysSubTab('rental');
+                  }}
+                >
+                  <View
+                    style={[
+                      styles.fuaChoiceIconWell,
+                      { backgroundColor: isRental ? `${theme.primary}22` : theme.mutedSurface },
+                    ]}
+                  >
+                    <AppIcon name="home" size={24} color={isRental ? theme.primary : theme.textSecondary} />
+                  </View>
+                  <AccessibleText
+                    style={[
+                      styles.fuaServiceChoiceTitle,
+                      { color: isRental ? theme.primary : theme.textPrimary },
+                    ]}
+                  >
+                    Rental
+                  </AccessibleText>
+                  <AccessibleText style={[styles.fuaServiceChoiceSub, { color: theme.textSecondary }]}>
+                    Longer stay
+                  </AccessibleText>
+                </PressableScale>
+              </View>
+
+              <PressableScale
+                style={[styles.kejaBrowseAll, nestSurface, { borderColor: theme.primary }]}
+                onPress={() => {
+                  HapticMap.light();
+                  setListingCatalog(isRental ? 'house' : 'bnb');
+                  setListingCounty('any');
+                  setListingRadiusKm(staysRadiusKm);
+                  setListingDetail(null);
+                  setHomeSheetStageAnimated('full');
+                  setHomeDeepPage('listings');
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="View all listings"
+              >
+                <View style={styles.kejaBrowseAllBody}>
+                  <AccessibleText style={[styles.kejaBrowseAllTitle, { color: theme.primary }]}>
+                    View all listings
+                  </AccessibleText>
+                  <AccessibleText style={[styles.kejaBrowseAllSub, { color: theme.textSecondary }]}>
+                    Browse every place
+                  </AccessibleText>
+                </View>
+                <Ionicons name="chevron-forward" size={20} color={theme.primary} />
+              </PressableScale>
+
+              <View style={styles.kejaToolbar}>
                 <View style={[styles.staysViewToggle, { backgroundColor: theme.mutedSurface, borderColor: theme.border }]}>
                   <Pressable
                     style={[
                       styles.staysViewModeBtn,
                       staysSheetViewMode === 'list' && { backgroundColor: theme.primaryLight },
                     ]}
-                    onPress={() => setStaysSheetViewMode('list')}
+                    onPress={() => {
+                      HapticMap.selection();
+                      setStaysSheetViewMode('list');
+                    }}
                     hitSlop={4}
                   >
                     <Ionicons
@@ -7087,15 +8374,6 @@ export default function App() {
                       size={16}
                       color={staysSheetViewMode === 'list' ? theme.primary : theme.textSecondary}
                     />
-                    <Text
-                      style={[
-                        styles.staysViewModeLabel,
-                        { color: staysSheetViewMode === 'list' ? theme.primary : theme.textSecondary },
-                        staysSheetViewMode === 'list' && styles.staysViewLinkOn,
-                      ]}
-                    >
-                      List
-                    </Text>
                   </Pressable>
                   <Pressable
                     style={[
@@ -7103,6 +8381,7 @@ export default function App() {
                       staysSheetViewMode === 'map' && { backgroundColor: theme.primaryLight },
                     ]}
                     onPress={() => {
+                      HapticMap.selection();
                       setStaysSheetViewMode('map');
                       if (!currentCoords) void fetchCurrentLocation();
                     }}
@@ -7113,117 +8392,73 @@ export default function App() {
                       size={16}
                       color={staysSheetViewMode === 'map' ? theme.primary : theme.textSecondary}
                     />
-                    <Text
-                      style={[
-                        styles.staysViewModeLabel,
-                        { color: staysSheetViewMode === 'map' ? theme.primary : theme.textSecondary },
-                        staysSheetViewMode === 'map' && styles.staysViewLinkOn,
-                      ]}
-                    >
-                      Map
-                    </Text>
                   </Pressable>
                 </View>
-                <View style={{ flex: 1, minWidth: 8 }} />
-                {STAYS_RADIUS_OPTIONS.map((km) => {
-                  const on = staysRadiusKm === km;
-                  return (
-                    <Pressable
-                      key={km}
-                      style={[
-                        styles.staysRadiusChip,
-                        { borderColor: theme.border, backgroundColor: theme.canvas },
-                        on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
-                      ]}
-                      onPress={() => setStaysRadiusKm(km)}
-                      hitSlop={4}
-                    >
-                      <Text
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.kejaRadiusRow}>
+                  {STAYS_RADIUS_OPTIONS.map((km) => {
+                    const on = staysRadiusKm === km;
+                    return (
+                      <Pressable
+                        key={km}
                         style={[
-                          styles.staysRadiusChipText,
-                          { color: on ? theme.primary : theme.textSecondary },
-                          on && styles.staysViewLinkOn,
+                          styles.staysRadiusChip,
+                          { borderColor: theme.border, backgroundColor: theme.canvas },
+                          on && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
                         ]}
-                      >
-                        {km} km
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-                <Pressable
-                  onPress={() => {
-                    setListingCatalog(isRental ? 'house' : 'bnb');
-                    setListingCounty('any');
-                    setListingRadiusKm(staysRadiusKm);
-                    setHomeDeepPage('listings');
-                    setHomeSheetStageAnimated('full');
-                  }}
-                  hitSlop={8}
-                >
-                  <Text style={[styles.juxSeeAll, { color: theme.primary }]}>Browse catalog</Text>
-                </Pressable>
-              </View>
-              {staysSheetViewMode === 'map' ? (
-                <>
-                  <Text style={styles.homeDeepCount}>
-                    {listingsInitialLoading
-                      ? 'Loading listings…'
-                      : `${stayCount} on map within ${staysRadiusKm} km · tap a pin for details`}
-                  </Text>
-                  <View style={[styles.staysHomeMapBand, { height: staysMapHeight }]}>
-                    {listingsInitialLoading ? (
-                      <View style={[styles.serviceMapFallback, { justifyContent: 'center' }]}>
-                        <ActivityIndicator size="small" color={theme.primary} />
-                        <Text style={[styles.serviceMapFallbackText, { marginTop: 10 }]}>
-                          Loading listings from server…
-                        </Text>
-                      </View>
-                    ) : staysHomeMapHtml ? (
-                      <WebView
-                        ref={staysHomeMapWebViewRef}
-                        source={{ html: staysHomeMapHtml }}
-                        style={StyleSheet.absoluteFillObject}
-                        originWhitelist={['*']}
-                        javaScriptEnabled
-                        domStorageEnabled
-                        scrollEnabled={false}
-                        bounces={false}
-                        setSupportMultipleWindows={false}
-                        mixedContentMode="always"
-                        onMessage={onHomeMapWebViewMessage}
-                        onLoadEnd={() => {
-                          injectStaysHomeMapSync();
+                        onPress={() => {
+                          HapticMap.selection();
+                          setStaysRadiusKm(km);
                         }}
-                        {...ANDROID_MAP_WEBVIEW_PROPS}
-                      />
-                    ) : (
-                      <View style={styles.serviceMapFallback}>
-                        <Text style={styles.serviceMapFallbackText}>
-                          Add EXPO_PUBLIC_MAPBOX_TOKEN to view stays on the map.
-                        </Text>
-                      </View>
-                    )}
-                    <View style={[styles.serviceMapLegend, styles.serviceMapLegendWrap, { top: 6, left: 8 }]}>
-                      <View style={styles.serviceMapLegendRow}>
-                        <View style={[styles.serviceMapLegendDot, { backgroundColor: '#22c55e' }]} />
-                        <Text style={styles.serviceMapLegendText}>You</Text>
-                      </View>
-                      <View style={styles.serviceMapLegendRow}>
-                        <View
+                        hitSlop={4}
+                      >
+                        <Text
                           style={[
-                            styles.serviceMapLegendDot,
-                            { backgroundColor: isRental ? '#A78BFA' : '#F472B6' },
+                            styles.staysRadiusChipText,
+                            { color: on ? theme.primary : theme.textSecondary },
+                            on && styles.staysViewLinkOn,
                           ]}
-                        />
-                        <Text style={styles.serviceMapLegendText}>{isRental ? 'Rental' : 'BnB'}</Text>
-                      </View>
+                        >
+                          {km} km
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              </View>
+
+              {staysSheetViewMode === 'map' ? (
+                <View style={[styles.staysHomeMapBand, { height: staysMapHeight }]}>
+                  {listingsInitialLoading ? (
+                    <View style={[styles.serviceMapFallback, { justifyContent: 'center' }]}>
+                      <ActivityIndicator size="small" color={theme.primary} />
                     </View>
-                  </View>
-                </>
+                  ) : staysHomeMapHtml ? (
+                    <WebView
+                      ref={staysHomeMapWebViewRef}
+                      source={{ html: staysHomeMapHtml }}
+                      style={StyleSheet.absoluteFillObject}
+                      originWhitelist={['*']}
+                      javaScriptEnabled
+                      domStorageEnabled
+                      scrollEnabled={false}
+                      bounces={false}
+                      setSupportMultipleWindows={false}
+                      mixedContentMode="always"
+                      onMessage={onHomeMapWebViewMessage}
+                      onLoadEnd={() => {
+                        injectStaysHomeMapSync();
+                      }}
+                      {...ANDROID_MAP_WEBVIEW_PROPS}
+                    />
+                  ) : (
+                    <View style={styles.serviceMapFallback}>
+                      <Text style={styles.serviceMapFallbackText}>Map needs a Mapbox token.</Text>
+                    </View>
+                  )}
+                </View>
               ) : listingsInitialLoading ? (
                 <View style={styles.listingsLoadingRow}>
                   <ActivityIndicator size="small" color={theme.primary} />
-                  <Text style={[styles.juxHintMuted, { marginLeft: 10 }]}>Loading listings from server…</Text>
                 </View>
               ) : dataError && !listingsLoaded ? (
                 <View style={styles.listingsLoadingRow}>
@@ -7234,102 +8469,85 @@ export default function App() {
                 </View>
               ) : stayRows.length > 0 ? (
                 <CarouselZone>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.juxStayCarousel}
-                  decelerationRate="fast"
-                  snapToInterval={stayCardW + 10}
-                >
-                  {isRental
-                    ? featuredHouses.map((house) => {
-                        const selected = focusedHouse?.id === house.id;
-                        return (
-                          <Pressable
-                            key={house.id}
-                            style={[styles.juxStayCard, { width: stayCardW }, selected && styles.juxStayCardSelected]}
-                            onPress={() => {
-                              setSelectedHouseId(house.id);
-                              setHomeSheetStageAnimated('full');
-                            }}
-                          >
-                            <View style={styles.juxStayCardImageWrap}>
-                              <Image source={house.image} style={styles.juxStayCardImage} resizeMode="cover" />
-                              <View style={styles.juxVacantBadge}>
-                                <Text style={styles.juxVacantBadgeText}>Vacant</Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={styles.juxStayCarousel}
+                    decelerationRate="fast"
+                    snapToInterval={stayCardW + 10}
+                  >
+                    {isRental
+                      ? featuredHouses.map((house) => {
+                          const selected = focusedHouse?.id === house.id;
+                          return (
+                            <Pressable
+                              key={house.id}
+                              style={[styles.juxStayCard, { width: stayCardW }, selected && styles.juxStayCardSelected]}
+                              onPress={() => {
+                                setSelectedHouseId(house.id);
+                                setHomeSheetStageAnimated('full');
+                              }}
+                            >
+                              <View style={styles.juxStayCardImageWrap}>
+                                <Image source={house.image} style={styles.juxStayCardImage} resizeMode="cover" />
+                                <View style={styles.juxVacantBadge}>
+                                  <Text style={styles.juxVacantBadgeText}>Vacant</Text>
+                                </View>
                               </View>
-                            </View>
-                            <View style={styles.juxStayCardBody}>
-                              <Text style={styles.juxStayCardTitle} numberOfLines={2}>
-                                {house.title}
-                              </Text>
-                              <ListingMetaText
-                                coords={house.coords}
-                                price={`${house.beds} bed · ${house.baths} bath`}
-                                reference={listingDistanceRef}
-                                fallbackCounty={house.county}
-                                distanceColor={theme.primary}
-                                metaColor={theme.textSecondary}
-                                style={styles.juxStayCardMeta}
-                              />
-                              <Text style={styles.juxStayCardPrice}>{house.price}</Text>
-                            </View>
-                          </Pressable>
-                        );
-                      })
-                    : featuredBnbs.map((bnb) => {
-                        const selected = focusedBnb?.id === bnb.id;
-                        return (
-                          <Pressable
-                            key={bnb.id}
-                            style={[styles.juxStayCard, { width: stayCardW }, selected && styles.juxStayCardSelected]}
-                            onPress={() => {
-                              setSelectedBnbId(bnb.id);
-                              setHomeSheetStageAnimated('full');
-                            }}
-                          >
-                            <Image source={bnb.image} style={styles.juxStayCardImage} resizeMode="cover" />
-                            <View style={styles.juxStayCardBody}>
-                              <Text style={styles.juxStayCardTitle} numberOfLines={2}>
-                                {bnb.title}
-                              </Text>
-                              <ListingMetaText
-                                coords={bnb.coords}
-                                price={`${bnb.rating} ★ · ${bnb.beds} bed · ${bnb.guests} guests`}
-                                reference={listingDistanceRef}
-                                fallbackCounty={bnb.county}
-                                distanceColor={theme.primary}
-                                metaColor={theme.textSecondary}
-                                style={styles.juxStayCardMeta}
-                              />
-                              <Text style={styles.juxStayCardPrice}>{bnb.price}</Text>
-                            </View>
-                          </Pressable>
-                        );
-                      })}
-                </ScrollView>
+                              <View style={styles.juxStayCardBody}>
+                                <Text style={styles.juxStayCardTitle} numberOfLines={2}>
+                                  {house.title}
+                                </Text>
+                                <ListingMetaText
+                                  coords={house.coords}
+                                  price={house.price}
+                                  reference={listingDistanceRef}
+                                  fallbackCounty={house.county}
+                                  distanceColor={theme.primary}
+                                  metaColor={theme.textSecondary}
+                                  style={styles.juxStayCardMeta}
+                                />
+                              </View>
+                            </Pressable>
+                          );
+                        })
+                      : featuredBnbs.map((bnb) => {
+                          const selected = focusedBnb?.id === bnb.id;
+                          return (
+                            <Pressable
+                              key={bnb.id}
+                              style={[styles.juxStayCard, { width: stayCardW }, selected && styles.juxStayCardSelected]}
+                              onPress={() => {
+                                setSelectedBnbId(bnb.id);
+                                setHomeSheetStageAnimated('full');
+                              }}
+                            >
+                              <Image source={bnb.image} style={styles.juxStayCardImage} resizeMode="cover" />
+                              <View style={styles.juxStayCardBody}>
+                                <Text style={styles.juxStayCardTitle} numberOfLines={2}>
+                                  {bnb.title}
+                                </Text>
+                                <ListingMetaText
+                                  coords={bnb.coords}
+                                  price={`${bnb.rating} ★ · ${bnb.price}`}
+                                  reference={listingDistanceRef}
+                                  fallbackCounty={bnb.county}
+                                  distanceColor={theme.primary}
+                                  metaColor={theme.textSecondary}
+                                  style={styles.juxStayCardMeta}
+                                />
+                              </View>
+                            </Pressable>
+                          );
+                        })}
+                  </ScrollView>
                 </CarouselZone>
               ) : (
-                <Text style={styles.juxHintMuted}>
-                  {isRental ? 'No rentals in range — widen radius or browse all.' : 'No stays in this area yet — browse the catalog.'}
-                </Text>
+                <AccessibleText style={[styles.kejaLead, { color: theme.textMuted }]}>
+                  Nothing nearby — try View all listings
+                </AccessibleText>
               )}
-              <Pressable
-                style={styles.homeDeepEntryRow}
-                onPress={() => {
-                  setListingCatalog(isRental ? 'house' : 'bnb');
-                  setListingCounty(stayCount > 0 && currentCounty ? currentCounty : 'any');
-                  setListingRadiusKm(staysRadiusKm);
-                  setListingDetail(null);
-                  setHomeSheetStageAnimated('full');
-                  setHomeDeepPage('listings');
-                }}
-              >
-                <Text style={[styles.homeDeepEntryTitle, { color: theme.primary }]}>
-                  {stayCount > 0 ? 'View all listings' : 'Browse catalog'} ›
-                </Text>
-                <Text style={styles.homeDeepEntrySub}>All areas · near me · list & map</Text>
-              </Pressable>
+
               {isRental && focusedHouse ? (
                 <View style={styles.juxListingDetail}>
                   <CarouselZone style={[styles.juxListingCarouselWrap, { width: listingCarouselW }]}>
@@ -7542,12 +8760,8 @@ export default function App() {
                     </View>
                   </View>
                 </View>
-              ) : (
-                <Text style={styles.juxHintMuted}>
-                  {isRental ? 'Tap a vacant rental to preview — request viewing below.' : 'Tap a stay to preview — reserve below.'}
-                </Text>
-              )}
-            </>
+              ) : null}
+            </View>
           );
         }
         default:
@@ -7629,6 +8843,7 @@ export default function App() {
                 : 'Fua request submitted — check Activity';
             flashBookingNotice(shortMsg, { goTrips: true });
             setLaundryWizardStep('pickup');
+            setFuaShowHubs(false);
             setPhaseForService('laundry', 'selecting');
             setHomeSheetStageAnimated('mid');
             void reloadLaundryOrders();
@@ -7641,7 +8856,7 @@ export default function App() {
         if (laundryWizardStep === 'pickup') {
           const pickupSublabel =
             laundryPickupMode === 'mamafua'
-              ? `${fuaWhenLabel(valetStudioWhen, mamafuaWhenOptions)} · ${pickupDisplayLabel}`
+              ? fuaWhenLabel(valetStudioWhen, mamafuaWhenOptions)
               : laundryStationId != null
                 ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Hub'
                 : 'Door pickup';
@@ -7800,6 +9015,18 @@ export default function App() {
               />
             );
           }
+        const focusedHouseRequest = activeListingRequestsByListingId.get(focusedHouse.id);
+        if (focusedHouseRequest) {
+          return (
+            <SheetStickyFooter
+              label="Requested"
+              tone="outline"
+              sublabel={`${focusedHouse.title} · ${focusedHouseRequest.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[focusedHouseRequest.status] ?? focusedHouseRequest.status}`}
+              darkMode={themeMode === 'dark'}
+              onPress={() => void openListingRequestDetail(focusedHouseRequest.id)}
+            />
+          );
+        }
           if (!rentalSubscriptionActive) {
             return (
               <SheetStickyFooter
@@ -7898,6 +9125,19 @@ export default function App() {
           );
         }
         const h = listingDetailEntity as HouseListing;
+        const houseRequest = activeListingRequestsByListingId.get(h.id);
+        if (houseRequest) {
+          return (
+            <SheetStickyFooter
+              label="Requested"
+              tone="outline"
+              sublabel={`${h.title} · ${houseRequest.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[houseRequest.status] ?? houseRequest.status}`}
+              darkMode={themeMode === 'dark'}
+              style={{ paddingBottom: insets.bottom + 8 }}
+              onPress={() => void openListingRequestDetail(houseRequest.id)}
+            />
+          );
+        }
         if (!rentalSubscriptionActive) {
           return (
             <SheetStickyFooter
@@ -8217,47 +9457,123 @@ export default function App() {
         ) : null}
 
         {onHomeTab && !destinationSearchOpen && !isActiveTripMode ? (
-          <Pressable
-            style={[styles.homeLocationStrip, { paddingHorizontal: gutter, borderColor: theme.border }]}
-            onPress={() => void fetchCurrentLocation()}
-          >
-            <View style={styles.mapLocationDot} />
-            <Text style={[styles.homeLocationStripText, { color: theme.textPrimary }]} numberOfLines={1}>
-              {locationLoading ? 'Locating…' : currentLocationLabel}
-            </Text>
-            {locationLoading ? (
-              <ActivityIndicator size="small" color={theme.primary} />
-            ) : (
-              <Text style={[styles.homeLocationRefresh, { color: theme.accentBlue }]}>↻</Text>
-            )}
-          </Pressable>
+          <View style={[styles.homeTopChrome, { paddingHorizontal: gutter, borderColor: theme.border, backgroundColor: theme.canvas }]}>
+            <Pressable
+              style={styles.homeLocationStrip}
+              onPress={() => void fetchCurrentLocation()}
+              accessibilityRole="button"
+              accessibilityLabel={`Location, ${homeLocationLine}`}
+            >
+              <Ionicons name="location-outline" size={16} color={theme.primary} />
+              <Text style={[styles.homeLocationStripText, { color: theme.textPrimary }]} numberOfLines={1}>
+                {homeLocationLine}
+              </Text>
+              <Ionicons name="chevron-down" size={14} color={theme.textMuted} />
+            </Pressable>
+            <Pressable
+              style={styles.homeNotifyBtn}
+              onPress={() => setActiveTab('activity')}
+              accessibilityRole="button"
+              accessibilityLabel={
+                activityTabBadgeCount > 0
+                  ? `Notifications, ${activityTabBadgeCount} updates`
+                  : 'Notifications'
+              }
+              hitSlop={8}
+            >
+              <Ionicons name="notifications-outline" size={20} color={theme.textPrimary} />
+              {activityTabBadgeCount > 0 ? (
+                <View style={[styles.homeNotifyBadge, { backgroundColor: theme.primary }]}>
+                  <Text style={styles.homeNotifyBadgeText}>
+                    {activityTabBadgeCount > 9 ? '9+' : String(activityTabBadgeCount)}
+                  </Text>
+                </View>
+              ) : null}
+            </Pressable>
+          </View>
         ) : null}
 
         {showServiceSegment ? (
-          <View style={[styles.serviceSegmentInChrome, { paddingHorizontal: gutter }]}>
-            <CarouselZone>
-            <ERServiceSegment
-              tabs={SERVICE_SEGMENTS}
-              active={activeSegment}
-              onChange={(key) => {
-                setActiveSegment(key);
-                if (key === 'laundry' || key === 'bnbs') {
-                  setActiveService(key);
-                  setHomeSheetStageAnimated('mid');
-                } else if (key === 'home') {
-                  setHomeSheetStageAnimated('mid');
-                }
-              }}
-              onComingSoon={(key) => {
-                setActiveSegment(key);
-                setHomeSheetStageAnimated('mid');
-              }}
-              fontSize={windowWidth < 360 ? 9 : windowWidth < 400 ? 10 : 11}
-              darkMode={themeMode === 'dark'}
-            />
-            </CarouselZone>
+          <View style={[styles.homeBrandRow, { paddingHorizontal: gutter, backgroundColor: theme.canvas }]}>
+            <View style={styles.homeLogoMark} accessibilityRole="header" accessibilityLabel="JuaX">
+              <Text style={[styles.homeLogoJua, { color: theme.primary }]}>Jua</Text>
+              <Text style={[styles.homeLogoX, { color: theme.textPrimary }]}>X</Text>
+            </View>
+            <View style={styles.homeHeaderSegments}>
+              <CarouselZone style={styles.homeHeaderSegmentsScroll}>
+                <ERServiceSegment
+                  tabs={HOME_HEADER_SEGMENTS}
+                  active={headerSegmentActive}
+                  variant="inline"
+                  onChange={(key) => {
+                    if (key === 'more') {
+                      setMoreServicesOpen(true);
+                      return;
+                    }
+                    setActiveSegment(key);
+                    if (key === 'laundry' || key === 'bnbs') {
+                      setActiveService(key);
+                      setHomeSheetStageAnimated('mid');
+                    } else if (key === 'home') {
+                      setHomeSheetStageAnimated('mid');
+                    }
+                  }}
+                  onComingSoon={(key) => {
+                    if (key === 'more') {
+                      setMoreServicesOpen(true);
+                      return;
+                    }
+                    setActiveSegment(key);
+                    setHomeSheetStageAnimated('mid');
+                  }}
+                  fontSize={13}
+                  darkMode={themeMode === 'dark'}
+                />
+              </CarouselZone>
+            </View>
           </View>
         ) : null}
+
+        <Modal
+          visible={moreServicesOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setMoreServicesOpen(false)}
+        >
+          <Pressable style={styles.moreMenuBackdrop} onPress={() => setMoreServicesOpen(false)}>
+            <Pressable
+              style={[
+                styles.moreMenuCard,
+                { backgroundColor: theme.sheet, borderColor: theme.border },
+              ]}
+              onPress={() => {}}
+            >
+              <Text style={[styles.moreMenuTitle, { color: theme.textPrimary }]}>More services</Text>
+              <View style={styles.moreMenuGrid}>
+                {MORE_SERVICE_MENU_SEGMENTS.map((seg) => (
+                  <Pressable
+                    key={seg.key}
+                    style={[
+                      styles.moreMenuItem,
+                      { borderColor: theme.border, backgroundColor: theme.mutedSurface },
+                      activeSegment === seg.key && { borderColor: theme.primary },
+                    ]}
+                    onPress={() => {
+                      setMoreServicesOpen(false);
+                      setActiveSegment(seg.key);
+                      setHomeSheetStageAnimated('mid');
+                    }}
+                  >
+                    <Text style={[styles.moreMenuItemLabel, { color: theme.textPrimary }]}>
+                      {seg.label.charAt(0) + seg.label.slice(1).toLowerCase()}
+                    </Text>
+                    <Text style={[styles.moreMenuItemSoon, { color: theme.textMuted }]}>Soon</Text>
+                  </Pressable>
+                ))}
+              </View>
+            </Pressable>
+          </Pressable>
+        </Modal>
 
         <View
           style={[
@@ -8287,18 +9603,16 @@ export default function App() {
               </Pressable>
             </View>
           ) : null}
-          {!!bookingMessage ? (
-            <Pressable
-              style={styles.juxNoticePill}
+          {bookingMessage ? (
+            <AnimatedNotice
+              message={bookingMessage}
               onPress={() => {
                 if (/check Activity/i.test(bookingMessage)) setActiveTab('activity');
                 setBookingMessage('');
               }}
-            >
-              <Text style={styles.juxNoticePillText} numberOfLines={1}>
-                {bookingMessage}
-              </Text>
-            </Pressable>
+              style={styles.juxNoticePill}
+              textStyle={styles.juxNoticePillText}
+            />
           ) : null}
           {locationError ? (
             <Pressable onPress={fetchCurrentLocation} style={styles.locationErrorBanner}>
@@ -8383,7 +9697,7 @@ export default function App() {
 
         {showMainTabBar ? (
           <ERTabBar
-            tabs={MAIN_TAB_CONFIG}
+            tabs={mainTabConfig}
             active={activeTab}
             onChange={(key) => {
               setActiveTab(key);
@@ -8425,18 +9739,21 @@ export default function App() {
                 </Pressable>
                 {homeDeepPage === 'service-map' ? (
                   <Text style={styles.homeDeepMapTitle}>{serviceMapTitle}</Text>
-                ) : homeDeepPage === 'listings' ? (
-                  <Text style={styles.homeDeepMapTitle}>Listings</Text>
                 ) : null}
               </View>
               {homeDeepPage === 'listings' ? (
                 <ListingsExplorePanel
                   theme={theme}
+                  darkMode={theme.isDark}
+                  collapsed={listingsFiltersCollapsed}
                   listingsViewMode={listingsViewMode}
                   onViewModeChange={setListingsViewMode}
+                  listingCatalog={listingCatalog}
+                  onListingCatalogChange={setListingCatalog}
                   listingCounty={listingCounty}
                   onListingCountyChange={handleListingCountyChange}
                   listingAreaChips={listingAreaChips}
+                  countyLabel={listingCountyChipLabel}
                   listingRadiusKm={listingRadiusKm}
                   onListingRadiusChange={(km) =>
                     setListingRadiusKm(km as (typeof STAYS_RADIUS_OPTIONS)[number])
@@ -8445,6 +9762,7 @@ export default function App() {
                   showRadiusChips={listingCounty === 'near_me'}
                   locationReady={!!currentCoords}
                   onRequestLocation={() => void fetchCurrentLocation()}
+                  resultCount={(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length}
                 />
               ) : null}
               {homeDeepPage === 'service-map' ? (
@@ -8537,37 +9855,10 @@ export default function App() {
               ) : homeDeepPage === 'listings' ? (
                 listingsViewMode === 'map' ? (
                   <View style={styles.listingsMapShell}>
-                    <View style={styles.valetSegmentTrack}>
-                      <Pressable
-                        style={[styles.valetSegment, listingCatalog === 'bnb' && styles.valetSegmentActive]}
-                        onPress={() => setListingCatalog('bnb')}
-                      >
-                        <Text
-                          style={[styles.valetSegmentText, listingCatalog === 'bnb' && styles.valetSegmentTextActive]}
-                        >
-                          BnBs
-                        </Text>
-                      </Pressable>
-                      <View style={styles.valetSegmentDivider} />
-                      <Pressable
-                        style={[styles.valetSegment, listingCatalog === 'house' && styles.valetSegmentActive]}
-                        onPress={() => setListingCatalog('house')}
-                      >
-                        <Text
-                          style={[styles.valetSegmentText, listingCatalog === 'house' && styles.valetSegmentTextActive]}
-                        >
-                          Rentals
-                        </Text>
-                      </Pressable>
-                    </View>
                     <Text style={styles.homeDeepCount}>
                       {listingsPageLoading
-                        ? 'Loading listings…'
-                        : listingCounty === 'near_me' && currentCoords
-                          ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} within ${listingRadiusKm} km · tap a pin`
-                          : listingCounty === 'any'
-                            ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} across all areas · tap a pin`
-                            : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin for details`}
+                        ? 'Loading…'
+                        : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} on map · tap a pin`}
                     </Text>
                     <View style={styles.listingsMapBody}>
                       {listingsPageLoading ? (
@@ -8647,40 +9938,12 @@ export default function App() {
                   contentContainerStyle={styles.homeDeepScrollContent}
                   keyboardShouldPersistTaps="handled"
                   showsVerticalScrollIndicator={false}
+                  scrollEventThrottle={16}
+                  onScroll={(event) => {
+                    const y = event.nativeEvent.contentOffset.y;
+                    setListingsFiltersCollapsedAnimated(y > 52);
+                  }}
                 >
-                  <Text style={styles.homeDeepPageLead}>Browse published listings from the server.</Text>
-                  <View style={styles.valetSegmentTrack}>
-                    <Pressable
-                      style={[styles.valetSegment, listingCatalog === 'bnb' && styles.valetSegmentActive]}
-                      onPress={() => setListingCatalog('bnb')}
-                    >
-                      <Text
-                        style={[styles.valetSegmentText, listingCatalog === 'bnb' && styles.valetSegmentTextActive]}
-                      >
-                        BnBs
-                      </Text>
-                    </Pressable>
-                    <View style={styles.valetSegmentDivider} />
-                    <Pressable
-                      style={[styles.valetSegment, listingCatalog === 'house' && styles.valetSegmentActive]}
-                      onPress={() => setListingCatalog('house')}
-                    >
-                      <Text
-                        style={[styles.valetSegmentText, listingCatalog === 'house' && styles.valetSegmentTextActive]}
-                      >
-                        Rentals
-                      </Text>
-                    </Pressable>
-                  </View>
-                  <Text style={styles.homeDeepCount}>
-                    {listingsPageLoading
-                      ? 'Loading…'
-                      : listingCounty === 'near_me'
-                        ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} within ${listingRadiusKm} km${currentCoords ? '' : ' (approx)'}`
-                        : listingCounty === 'any'
-                          ? `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} across all areas`
-                          : `${(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length} results`}
-                  </Text>
                   {listingsPageLoading ? (
                     <View style={styles.listingsLoadingRow}>
                       <ActivityIndicator size="small" color={theme.primary} />
@@ -8703,7 +9966,7 @@ export default function App() {
                   ) : (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length === 0 ? (
                     <Text style={styles.juxHintMuted}>
                       {listingCounty === 'near_me' && !currentCoords && !listingsCounty
-                        ? 'Turn on location or set your county in profile to filter Near me.'
+                        ? 'Turn on location to filter Near me.'
                         : listingCounty === 'near_me' && !currentCoords
                           ? `Showing listings in ${countyDisplayLabel} while location loads — enable GPS for precise Near me.`
                           : listingCounty === 'near_me' && currentCoords
@@ -8712,7 +9975,18 @@ export default function App() {
                     </Text>
                   ) : null}
                   {!listingsInitialLoading && !listingsError
-                    ? (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).map((row, ri, arr) => (
+                    ? (listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).map((row, ri, arr) => {
+                    const rowListingId = row.id;
+                    const activeRequest = activeListingRequestsByListingId.get(rowListingId) ?? null;
+                    const stayBooking =
+                      listingCatalog === 'bnb'
+                        ? findActiveBnbBookingForListing(bnbBookings, rowListingId)
+                        : undefined;
+                    const requestLabel =
+                      activeRequest?.statusLabel ??
+                      (activeRequest ? LISTING_REQUEST_STATUS_LABELS[activeRequest.status] ?? 'Requested' : null);
+                    const statusLabel = stayBooking ? 'Reserved' : requestLabel;
+                    return (
                     <Pressable
                       key={listingCatalog === 'bnb' ? (row as BnbListing).id : (row as HouseListing).id}
                       style={[styles.listingCatRow, ri === arr.length - 1 && styles.listingCatRowLast]}
@@ -8743,9 +10017,18 @@ export default function App() {
                         resizeMode="cover"
                       />
                       <View style={styles.listingCatBody}>
-                        <Text style={styles.listingCatTitle} numberOfLines={2}>
-                          {listingCatalog === 'bnb' ? (row as BnbListing).title : (row as HouseListing).title}
-                        </Text>
+                        <View style={styles.listingCatTitleRow}>
+                          <Text style={styles.listingCatTitle} numberOfLines={2}>
+                            {listingCatalog === 'bnb' ? (row as BnbListing).title : (row as HouseListing).title}
+                          </Text>
+                          {statusLabel ? (
+                            <View style={[styles.listingRequestBadge, { backgroundColor: theme.primaryLight }]}>
+                              <Text style={[styles.listingRequestBadgeText, { color: theme.primary }]}>
+                                {statusLabel}
+                              </Text>
+                            </View>
+                          ) : null}
+                        </View>
                         <ListingMetaText
                           coords={row.coords}
                           price={
@@ -8765,7 +10048,8 @@ export default function App() {
                       </View>
                       <Text style={styles.listingCatChev}>›</Text>
                     </Pressable>
-                  ))
+                  );
+                  })
                     : null}
                 </ScrollView>
                 )
@@ -9002,6 +10286,26 @@ export default function App() {
                         </ScrollView>
                         <View style={styles.valetListingFooterCompact}>
                           {!(listingDetailEntity as HouseListing).locationLocked ? (
+                            (() => {
+                              const existingRequest = activeListingRequestsByListingId.get(
+                                (listingDetailEntity as HouseListing).id,
+                              );
+                              if (existingRequest) {
+                                return (
+                                  <Pressable
+                                    onPress={() => void openListingRequestDetail(existingRequest.id)}
+                                    style={styles.textRowActionHit}
+                                  >
+                                    <Text style={styles.textRowAction}>
+                                      Requested ·{' '}
+                                      {existingRequest.statusLabel ??
+                                        LISTING_REQUEST_STATUS_LABELS[existingRequest.status] ??
+                                        existingRequest.status}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              }
+                              return (
                             <Pressable
                               onPress={() => {
                                 if (!listingDetailEntity || listingDetail.kind !== 'house') return;
@@ -9016,6 +10320,8 @@ export default function App() {
                             >
                               <Text style={styles.textRowActionMuted}>Request viewing</Text>
                             </Pressable>
+                              );
+                            })()
                           ) : null}
                         </View>
                       </View>
@@ -10244,6 +11550,7 @@ export default function App() {
         loading={listingRequestSheetLoading}
         submitting={listingRequestReplySubmitting}
         onClose={() => {
+          if (listingRequestSheetId) markListingRequestViewed(listingRequestSheetId);
           setListingRequestSheetId(null);
           setListingRequestDetail(null);
         }}
@@ -11801,17 +13108,123 @@ const createStyles = (theme: Theme) =>
       flex: 1,
       flexDirection: 'column',
     },
-    homeLocationStrip: {
+    homeTopChrome: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
-      paddingVertical: 10,
+      paddingVertical: 8,
       borderBottomWidth: StyleSheet.hairlineWidth,
+    },
+    homeLocationStrip: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      minWidth: 0,
     },
     homeLocationStripText: {
       flex: 1,
       fontSize: 13,
       fontFamily: 'Inter_500Medium',
+    },
+    homeNotifyBtn: {
+      width: 36,
+      height: 36,
+      alignItems: 'center',
+      justifyContent: 'center',
+      position: 'relative',
+    },
+    homeNotifyBadge: {
+      position: 'absolute',
+      top: 2,
+      right: 2,
+      minWidth: 16,
+      height: 16,
+      borderRadius: 8,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 4,
+    },
+    homeNotifyBadgeText: {
+      color: '#fff',
+      fontSize: 9,
+      fontFamily: 'Inter_700Bold',
+    },
+    homeBrandRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingTop: 8,
+      paddingBottom: 10,
+      flexShrink: 0,
+    },
+    homeLogoMark: {
+      flexDirection: 'row',
+      alignItems: 'baseline',
+      flexShrink: 0,
+      marginRight: 2,
+    },
+    homeLogoJua: {
+      fontSize: 24,
+      lineHeight: 28,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.6,
+    },
+    homeLogoX: {
+      fontSize: 24,
+      lineHeight: 28,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.6,
+    },
+    homeHeaderSegments: {
+      flex: 1,
+      minWidth: 0,
+      overflow: 'hidden',
+    },
+    homeHeaderSegmentsScroll: {
+      flexGrow: 0,
+      width: '100%',
+    },
+    moreMenuBackdrop: {
+      flex: 1,
+      backgroundColor: 'rgba(0,0,0,0.4)',
+      justifyContent: 'flex-end',
+    },
+    moreMenuCard: {
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      borderWidth: StyleSheet.hairlineWidth,
+      padding: 18,
+      paddingBottom: 28,
+      gap: 12,
+    },
+    moreMenuTitle: {
+      fontSize: 17,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    moreMenuGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+    },
+    moreMenuItem: {
+      width: '48%',
+      minHeight: 52,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      justifyContent: 'center',
+    },
+    moreMenuItemLabel: {
+      fontSize: 12,
+      fontFamily: 'Inter_600SemiBold',
+      letterSpacing: 0.4,
+    },
+    moreMenuItemSoon: {
+      fontSize: 10,
+      fontFamily: 'Inter_500Medium',
+      marginTop: 2,
     },
     homeLocationRefresh: {
       fontSize: 16,
@@ -11857,12 +13270,12 @@ const createStyles = (theme: Theme) =>
       borderTopLeftRadius: 20,
       borderTopRightRadius: 20,
       overflow: 'hidden',
-      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopWidth: theme.isDark ? 0 : StyleSheet.hairlineWidth,
       shadowColor: '#000',
-      shadowOffset: { width: 0, height: -2 },
-      shadowOpacity: 0.1,
-      shadowRadius: 20,
-      elevation: 16,
+      shadowOffset: { width: 0, height: theme.isDark ? -3 : -2 },
+      shadowOpacity: theme.isDark ? 0.38 : 0.1,
+      shadowRadius: theme.isDark ? 16 : 20,
+      elevation: theme.isDark ? 10 : 16,
       minHeight: 0,
     },
     juxSheetFlex: {
@@ -12620,6 +14033,44 @@ const createStyles = (theme: Theme) =>
       marginTop: 6,
       marginBottom: 4,
     },
+    fuaSheetRoot: {
+      position: 'relative',
+      overflow: 'hidden',
+      paddingBottom: 4,
+    },
+    fuaWatermark: {
+      position: 'absolute',
+      right: -28,
+      top: 8,
+      opacity: 1,
+      transform: [{ rotate: '-12deg' }],
+    },
+    fuaHeaderBlock: {
+      marginBottom: 14,
+      paddingRight: 56,
+    },
+    fuaDots: {
+      flexDirection: 'row',
+      gap: 6,
+      marginBottom: 10,
+    },
+    fuaDot: {
+      width: 22,
+      height: 4,
+      borderRadius: 2,
+    },
+    fuaTitle: {
+      fontSize: 24,
+      lineHeight: 28,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.4,
+    },
+    fuaSubtitle: {
+      marginTop: 4,
+      fontSize: 14,
+      lineHeight: 19,
+      fontFamily: 'Inter_400Regular',
+    },
     fuaProgressDots: {
       flexDirection: 'row',
       gap: 6,
@@ -12633,7 +14084,79 @@ const createStyles = (theme: Theme) =>
     fuaInlineLink: {
       fontSize: 13,
       fontFamily: 'Inter_600SemiBold',
+      marginTop: 4,
+      marginBottom: 10,
+    },
+    fuaLocationCard: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      paddingHorizontal: 12,
+      paddingVertical: 12,
+      marginBottom: 10,
+    },
+    fuaLocationBody: {
+      flex: 1,
+      minWidth: 0,
+    },
+    fuaLocationLabel: {
+      fontSize: 11,
+      fontFamily: 'Inter_500Medium',
+      marginBottom: 2,
+    },
+    fuaLocationValue: {
+      fontSize: 14,
+      fontFamily: 'Inter_600SemiBold',
+      lineHeight: 18,
+    },
+    fuaLocationAction: {
+      fontSize: 16,
+      fontFamily: 'Inter_600SemiBold',
+      paddingHorizontal: 4,
+    },
+    fuaWhenRow: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: 8,
+      marginBottom: 10,
+    },
+    fuaWhenChip: {
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      borderRadius: 999,
+      borderWidth: 1.5,
+      borderColor: theme.border,
+    },
+    fuaWhenChipText: {
+      fontSize: 13,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    fuaLoadCard: {
+      borderRadius: 16,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      paddingVertical: 16,
+      paddingHorizontal: 12,
       marginBottom: 12,
+      gap: 8,
+    },
+    fuaLoadCenter: {
+      alignItems: 'center',
+      minWidth: 96,
+    },
+    fuaLoadValue: {
+      fontSize: 28,
+      lineHeight: 32,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.5,
+    },
+    fuaLoadHint: {
+      marginTop: 2,
+      fontSize: 11,
+      fontFamily: 'Inter_400Regular',
     },
     fuaAddressRow: {
       flexDirection: 'row',
@@ -12673,22 +14196,23 @@ const createStyles = (theme: Theme) =>
     },
     fuaNotesInput: {
       borderWidth: 1,
-      borderRadius: 10,
-      padding: 10,
-      minHeight: 56,
+      borderRadius: 12,
+      padding: 12,
+      minHeight: 48,
       fontSize: 13,
       fontFamily: 'Inter_400Regular',
-      marginBottom: 12,
+      marginBottom: 8,
       textAlignVertical: 'top',
     },
     fuaTaskRow: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
-      paddingVertical: 10,
+      paddingVertical: 12,
       paddingHorizontal: 12,
-      borderWidth: 1,
-      borderRadius: 10,
+      borderWidth: 1.5,
+      borderColor: theme.border,
+      borderRadius: 12,
       marginBottom: 8,
     },
     fuaTaskLabel: {
@@ -12707,26 +14231,27 @@ const createStyles = (theme: Theme) =>
       textAlign: 'center',
     },
     fuaReceipt: {
-      borderRadius: 12,
+      borderRadius: 16,
       borderWidth: 1,
-      padding: 14,
+      padding: 16,
       gap: 6,
     },
     fuaReceiptLine: {
-      fontSize: 14,
+      fontSize: 16,
       fontFamily: 'Inter_600SemiBold',
-      lineHeight: 20,
+      lineHeight: 22,
     },
     fuaReceiptMeta: {
-      fontSize: 12,
-      fontFamily: 'Inter_500Medium',
+      fontSize: 13,
+      fontFamily: 'Inter_400Regular',
+      lineHeight: 18,
     },
     fuaReceiptTotal: {
       flexDirection: 'row',
       justifyContent: 'space-between',
       alignItems: 'center',
-      marginTop: 8,
-      paddingTop: 10,
+      marginTop: 10,
+      paddingTop: 12,
       borderTopWidth: StyleSheet.hairlineWidth,
     },
     fuaReceiptTotalLabel: {
@@ -12734,7 +14259,7 @@ const createStyles = (theme: Theme) =>
       fontFamily: 'Inter_500Medium',
     },
     fuaReceiptTotalValue: {
-      fontSize: 17,
+      fontSize: 20,
       fontFamily: 'Inter_700Bold',
     },
     listingsLoadingRow: {
@@ -12746,51 +14271,69 @@ const createStyles = (theme: Theme) =>
     fuaServiceChoiceRow: {
       flexDirection: 'row',
       gap: 10,
-      marginBottom: 16,
+      marginBottom: 12,
     },
     fuaServiceChoiceCard: {
       flex: 1,
-      borderRadius: 14,
+      borderRadius: 16,
       borderWidth: 1.5,
+      borderColor: theme.border,
       padding: 14,
-      gap: 4,
+      gap: 6,
+      alignItems: 'flex-start',
+      minHeight: 108,
     },
     fuaServiceChoiceCardOn: {
       borderColor: theme.primary,
       backgroundColor: theme.primaryLight,
     },
-    fuaServiceChoiceIcon: {
+    fuaChoiceIconWell: {
+      width: 44,
+      height: 44,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
       marginBottom: 2,
     },
+    fuaServiceChoiceIcon: {
+      marginBottom: 4,
+    },
     fuaServiceChoiceTitle: {
-      fontSize: 14,
-      fontFamily: 'Inter_600SemiBold',
+      fontSize: 15,
+      fontFamily: 'Inter_700Bold',
     },
     fuaServiceChoiceSub: {
-      fontSize: 11,
+      fontSize: 12,
       fontFamily: 'Inter_400Regular',
       lineHeight: 15,
     },
     fuaStationChip: {
       marginRight: 8,
-      paddingHorizontal: 12,
-      paddingVertical: 8,
-      borderRadius: 10,
+      paddingHorizontal: 14,
+      paddingVertical: 12,
+      borderRadius: 12,
       borderWidth: 1.5,
-      maxWidth: 140,
+      minWidth: 100,
+      maxWidth: 150,
+      justifyContent: 'center',
     },
     fuaStationChipOn: {
       borderColor: theme.primary,
       backgroundColor: theme.primaryLight,
     },
     fuaStationChipText: {
-      fontSize: 12,
+      fontSize: 13,
       fontFamily: 'Inter_500Medium',
       color: theme.textPrimary,
     },
     fuaStationChipTextOn: {
       fontFamily: 'Inter_600SemiBold',
       color: theme.primary,
+    },
+    fuaStationChipSub: {
+      fontSize: 10,
+      fontFamily: 'Inter_400Regular',
+      marginTop: 2,
     },
     valetStepperCompact: {
       marginTop: 10,
@@ -13486,6 +15029,13 @@ const createStyles = (theme: Theme) =>
       marginTop: 14,
       paddingVertical: 4,
     },
+    fuaMapEntryRow: {
+      marginTop: 14,
+      paddingVertical: 12,
+      paddingHorizontal: 12,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+    },
     homeDeepEntryTitle: {
       fontSize: 14,
       fontFamily: 'Inter_700Bold',
@@ -13524,11 +15074,29 @@ const createStyles = (theme: Theme) =>
     listingCatBody: {
       flex: 1,
     },
+    listingCatTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
     listingCatTitle: {
+      flex: 1,
       fontSize: 15,
       fontFamily: 'Inter_600SemiBold',
       color: theme.textPrimary,
       lineHeight: 20,
+    },
+    listingRequestBadge: {
+      paddingHorizontal: 8,
+      paddingVertical: 3,
+      borderRadius: 999,
+      alignSelf: 'flex-start',
+    },
+    listingRequestBadgeText: {
+      fontSize: 10,
+      fontFamily: 'Inter_600SemiBold',
+      textTransform: 'uppercase',
+      letterSpacing: 0.3,
     },
     listingCatMeta: {
       marginTop: 3,
@@ -13645,7 +15213,7 @@ const createStyles = (theme: Theme) =>
       flexDirection: 'row',
       gap: 4,
       marginHorizontal: 4,
-      marginBottom: 12,
+      marginBottom: 10,
       padding: 4,
       borderRadius: 16,
       backgroundColor: theme.mutedSurface,
@@ -13669,6 +15237,74 @@ const createStyles = (theme: Theme) =>
     staysSubSegmentTextOn: {
       fontFamily: 'Inter_600SemiBold',
       color: theme.textPrimary,
+    },
+    kejaSheetRoot: {
+      position: 'relative',
+      overflow: 'hidden',
+      paddingBottom: 4,
+    },
+    kejaWatermark: {
+      position: 'absolute',
+      right: -28,
+      top: 4,
+      transform: [{ rotate: '-12deg' }],
+    },
+    kejaHeaderBlock: {
+      marginBottom: 12,
+      paddingRight: 56,
+    },
+    kejaTitle: {
+      fontSize: 24,
+      lineHeight: 28,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.4,
+    },
+    kejaSubtitle: {
+      marginTop: 4,
+      fontSize: 14,
+      lineHeight: 19,
+      fontFamily: 'Inter_400Regular',
+    },
+    kejaLead: {
+      fontSize: 13,
+      fontFamily: 'Inter_400Regular',
+      marginBottom: 10,
+      lineHeight: 18,
+    },
+    kejaBrowseAll: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      borderRadius: 14,
+      borderWidth: 1.5,
+      paddingVertical: 14,
+      paddingHorizontal: 14,
+      marginBottom: 12,
+    },
+    kejaBrowseAllBody: {
+      flex: 1,
+      minWidth: 0,
+    },
+    kejaBrowseAllTitle: {
+      fontSize: 15,
+      fontFamily: 'Inter_700Bold',
+    },
+    kejaBrowseAllSub: {
+      marginTop: 2,
+      fontSize: 12,
+      fontFamily: 'Inter_400Regular',
+    },
+    kejaToolbar: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      marginBottom: 12,
+    },
+    kejaRadiusRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingRight: 4,
     },
     staysSectionActionsRow: {
       flexDirection: 'row',
@@ -13810,6 +15446,205 @@ const createStyles = (theme: Theme) =>
       color: theme.textPrimary,
       marginBottom: 8,
     },
+    activityHero: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      marginBottom: 14,
+      gap: 12,
+    },
+    activityHeroText: {
+      flex: 1,
+      minWidth: 0,
+    },
+    activityHeroIcons: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    activityTitle: {
+      fontSize: 24,
+      lineHeight: 28,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.4,
+    },
+    activitySubtitle: {
+      marginTop: 4,
+      fontSize: 13,
+      fontFamily: 'Inter_400Regular',
+    },
+    activityBadgePill: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+      borderRadius: 999,
+    },
+    activityBadgeText: {
+      fontSize: 12,
+      fontFamily: 'Inter_700Bold',
+    },
+    activityTabs: {
+      flexDirection: 'row',
+      borderRadius: 12,
+      padding: 4,
+      gap: 4,
+      marginBottom: 16,
+    },
+    activityTab: {
+      flex: 1,
+      minHeight: 36,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 8,
+    },
+    activityTabLabel: {
+      fontSize: 13,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    activityCard: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 12,
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: 14,
+      marginBottom: 10,
+    },
+    activityIconWell: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    activityPlanBanner: {
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 12,
+    },
+    activityServiceHeader: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      marginTop: 4,
+      marginBottom: 8,
+    },
+    activityServiceTitle: {
+      flex: 1,
+      fontSize: 14,
+      fontFamily: 'Inter_700Bold',
+    },
+    activityServiceCount: {
+      minWidth: 24,
+      height: 24,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingHorizontal: 8,
+    },
+    activityServiceCountText: {
+      fontSize: 12,
+      fontFamily: 'Inter_600SemiBold',
+    },
+    profileHero: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      borderRadius: 16,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      padding: 14,
+      marginBottom: 14,
+    },
+    profileStatsRow: {
+      flexDirection: 'row',
+      gap: 8,
+      marginBottom: 16,
+    },
+    profileStatCard: {
+      flex: 1,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      paddingVertical: 12,
+      paddingHorizontal: 8,
+      alignItems: 'center',
+    },
+    profileStatValue: {
+      fontSize: 15,
+      fontFamily: 'Inter_700Bold',
+    },
+    profileStatLabel: {
+      marginTop: 4,
+      fontSize: 11,
+      fontFamily: 'Inter_500Medium',
+    },
+    profileGroup: {
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      overflow: 'hidden',
+      marginBottom: 8,
+    },
+    profileRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 12,
+      paddingHorizontal: 14,
+      paddingVertical: 14,
+    },
+    profileRowIcon: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    profileRowDivider: {
+      height: StyleSheet.hairlineWidth,
+      marginLeft: 62,
+    },
+    profileSectionLabel: {
+      marginTop: 12,
+      marginBottom: 8,
+      fontSize: 11,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: 0.6,
+      textTransform: 'uppercase',
+    },
+    makeTripsHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 10,
+    },
+    makeTripsAlertRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    makeTripsAlertChip: {
+      minWidth: 42,
+      height: 30,
+      borderRadius: 12,
+      borderWidth: StyleSheet.hairlineWidth,
+      paddingHorizontal: 8,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 4,
+    },
+    makeTripsAlertIcon: {
+      fontSize: 12,
+    },
+    makeTripsAlertCount: {
+      fontSize: 12,
+      fontFamily: 'Inter_700Bold',
+    },
     makeTripsActiveList: {
       gap: 12,
       marginBottom: 20,
@@ -13818,12 +15653,18 @@ const createStyles = (theme: Theme) =>
     makeTripCard: {
       borderRadius: 16,
       overflow: 'hidden',
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: 2 },
-      shadowOpacity: 0.06,
-      shadowRadius: 12,
-      elevation: 2,
+      ...(theme.isDark ? DarkElevation.card : {
+        shadowColor: '#000',
+        shadowOffset: { width: 0, height: 2 },
+        shadowOpacity: 0.06,
+        shadowRadius: 12,
+        elevation: 2,
+      }),
       marginBottom: 12,
+    },
+    makeTripIntroCard: {
+      borderRadius: 10,
+      overflow: 'visible',
     },
     makeTripCardHead: {
       flexDirection: 'row',
@@ -13857,9 +15698,10 @@ const createStyles = (theme: Theme) =>
     },
     makeHistoryCard: {
       borderRadius: 16,
-      borderWidth: StyleSheet.hairlineWidth,
+      borderWidth: theme.isDark ? 0 : StyleSheet.hairlineWidth,
       overflow: 'hidden',
       marginBottom: 16,
+      ...(theme.isDark ? DarkElevation.card : {}),
     },
     makeHistoryRow: {
       flexDirection: 'row',
@@ -13941,14 +15783,26 @@ const createStyles = (theme: Theme) =>
     },
     themePreferenceRow: {
       flexDirection: 'row',
-      gap: 8,
+      gap: 12,
+      marginBottom: 4,
     },
     themePreferenceChip: {
       flex: 1,
+      minHeight: 72,
       paddingVertical: 12,
-      borderRadius: 12,
+      paddingHorizontal: 10,
+      borderRadius: 16,
       borderWidth: 1.5,
       alignItems: 'center',
+      justifyContent: 'center',
+      gap: 8,
+    },
+    themePreferenceIconWell: {
+      width: 36,
+      height: 36,
+      borderRadius: 10,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     themePreferenceChipText: {
       fontSize: 13,
@@ -13956,8 +15810,9 @@ const createStyles = (theme: Theme) =>
     },
     makeProfileCard: {
       borderRadius: 16,
-      borderWidth: StyleSheet.hairlineWidth,
+      borderWidth: theme.isDark ? 0 : StyleSheet.hairlineWidth,
       overflow: 'hidden',
+      ...(theme.isDark ? DarkElevation.card : {}),
     },
     makeProfileRow: {
       flexDirection: 'row',
@@ -14050,6 +15905,33 @@ const createStyles = (theme: Theme) =>
       fontSize: 12,
       fontFamily: 'Inter_400Regular',
       lineHeight: 18,
+    },
+    comingSoonSheetRoot: {
+      position: 'relative',
+      overflow: 'hidden',
+      paddingBottom: 4,
+    },
+    comingSoonWatermark: {
+      position: 'absolute',
+      right: -28,
+      top: 4,
+      transform: [{ rotate: '-12deg' }],
+    },
+    comingSoonHeaderBlock: {
+      marginBottom: 12,
+      paddingRight: 56,
+    },
+    comingSoonTitle: {
+      fontSize: 24,
+      lineHeight: 28,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: -0.4,
+    },
+    comingSoonSubtitle: {
+      marginTop: 4,
+      fontSize: 14,
+      lineHeight: 19,
+      fontFamily: 'Inter_400Regular',
     },
     comingSoonEmojiBanner: {
       alignSelf: 'flex-start',

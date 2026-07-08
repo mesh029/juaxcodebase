@@ -1,4 +1,4 @@
-import { Easing } from 'react-native';
+import { Easing, LayoutAnimation } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
 /**
@@ -17,11 +17,32 @@ export const Motion = {
     exit: Easing.in(Easing.cubic),
   },
   duration: {
+    tap: 180,
     fast: 150,
     normal: 250,
+    transition: 300,
     slow: 350,
   },
+  press: {
+    scale: 0.97,
+    opacity: 0.86,
+  },
 } as const;
+
+export type LayoutAnimationKind = 'sheet' | 'segment' | 'filter';
+
+/** Shared LayoutAnimation presets — sheet snap, service swipe, filter collapse. */
+export function configureLayoutAnimation(kind: LayoutAnimationKind = 'sheet') {
+  const duration =
+    kind === 'segment'
+      ? Motion.duration.normal
+      : kind === 'filter'
+        ? Motion.duration.fast
+        : Motion.duration.transition;
+  LayoutAnimation.configureNext(
+    LayoutAnimation.create(duration, LayoutAnimation.Types.easeInEaseOut, LayoutAnimation.Properties.opacity),
+  );
+}
 
 /** Haptics at the right moments — never on scroll or hover */
 export const HapticMap = {
