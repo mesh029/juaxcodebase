@@ -18,7 +18,6 @@ import {
   Platform,
   PanResponder,
   RefreshControl,
-  UIManager,
   StatusBar as RNStatusBar,
   ScrollView,
   StyleSheet,
@@ -122,10 +121,6 @@ import {
   type CountyKey,
 } from './lib/county';
 import { ProfileEditor } from './components/profile/ProfileEditor';
-
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
 
 type HomeSheetStage = 'collapsed' | 'mid' | 'full';
 /** When the map should dominate the screen (Uber/Bolt-style emphasis). */
@@ -2407,6 +2402,7 @@ export default function App() {
   const [staysRadiusKm, setStaysRadiusKm] = useState<(typeof STAYS_RADIUS_OPTIONS)[number]>(5);
   const [rentalSubscriptionActive, setRentalSubscriptionActive] = useState(false);
   const [activeSubscriptionPlan, setActiveSubscriptionPlan] = useState<string | null>(null);
+  const [activeSubscriptionExpiresAt, setActiveSubscriptionExpiresAt] = useState<string | null>(null);
   const [subscriptionSheetOpen, setSubscriptionSheetOpen] = useState(false);
   const [bnbBookingSheetOpen, setBnbBookingSheetOpen] = useState(false);
   const [bnbBookingTarget, setBnbBookingTarget] = useState<{ id: string; title: string; price: string } | null>(
@@ -2726,10 +2722,9 @@ export default function App() {
   const styles = useMemo(() => createStyles(theme), [theme]);
 
   useEffect(() => {
-    if (Platform.OS !== 'android') return;
-    RNStatusBar.setBackgroundColor(theme.background, true);
+    // Edge-to-edge: StatusBar background APIs are unsupported — style only.
     RNStatusBar.setBarStyle(themeMode === 'dark' ? 'light-content' : 'dark-content');
-  }, [theme.background, themeMode]);
+  }, [themeMode]);
   const gutter = Math.min(24, Math.max(14, Math.round(windowWidth * 0.042)));
   const tabBarInnerHeight = 56;
   const tabBarBottomPad = bottomInset;
@@ -4549,14 +4544,18 @@ export default function App() {
     if (!isAuthed) {
       setRentalSubscriptionActive(false);
       setActiveSubscriptionPlan(null);
+      setActiveSubscriptionExpiresAt(null);
       return;
     }
     try {
       const { active, subscription } = await fetchActiveSubscription();
       setRentalSubscriptionActive(active);
       setActiveSubscriptionPlan(subscription?.plan ?? null);
+      setActiveSubscriptionExpiresAt(subscription?.expiresAt ?? null);
     } catch {
       setRentalSubscriptionActive(false);
+      setActiveSubscriptionPlan(null);
+      setActiveSubscriptionExpiresAt(null);
     }
   }, [isAuthed]);
 
@@ -5266,6 +5265,7 @@ export default function App() {
       const { subscription: paid } = await confirmSubscriptionPayment(subscription.id, dummyReceipt);
       setRentalSubscriptionActive(paid.active);
       setActiveSubscriptionPlan(paid.plan);
+      setActiveSubscriptionExpiresAt(paid.expiresAt ?? null);
       setSubscriptionSheetOpen(false);
       flashBookingNotice('Subscription active — rental locations unlocked');
       if (listingDetail?.kind === 'house') {
@@ -7177,21 +7177,106 @@ export default function App() {
                 </AccessibleText>
                 <AccessibleText style={[styles.profileStatLabel, { color: theme.textMuted }]}>Member</AccessibleText>
               </View>
-              <PressableScale
-                style={[styles.profileStatCard, nestSurface]}
-                onPress={() => {
-                  HapticMap.light();
-                  setActiveTab('home');
-                  setActiveSegment('bnbs');
-                  setActiveService('bnbs');
-                  setHomeSheetStageAnimated('mid');
-                }}
-              >
-                <AccessibleText style={[styles.profileStatValue, { color: theme.primary }]} numberOfLines={1}>
-                  {rentalSubscriptionActive ? 'Active' : 'Plans'}
+              <View style={[styles.profileStatCard, nestSurface]}>
+                <AccessibleText
+                  style={[
+                    styles.profileStatValue,
+                    { color: rentalSubscriptionActive ? theme.primary : theme.textPrimary },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {rentalSubscriptionActive ? '1' : '0'}
                 </AccessibleText>
-                <AccessibleText style={[styles.profileStatLabel, { color: theme.textMuted }]}>Keja</AccessibleText>
-              </PressableScale>
+                <AccessibleText style={[styles.profileStatLabel, { color: theme.textMuted }]}>
+                  Subscribed
+                </AccessibleText>
+              </View>
+            </View>
+
+            <AccessibleText style={[styles.profileSectionLabel, { color: theme.textMuted }]}>
+              Subscriptions
+            </AccessibleText>
+            <View style={[styles.profileGroup, nestSurface, { marginBottom: 12 }]}>
+              {(() => {
+                const planMeta =
+                  subscriptionPlans.find((p) => p.plan === activeSubscriptionPlan) ?? null;
+                const planLabel =
+                  planMeta?.label ??
+                  (activeSubscriptionPlan
+                    ? `${activeSubscriptionPlan.charAt(0).toUpperCase()}${activeSubscriptionPlan.slice(1)}`
+                    : null);
+                const expiresLabel = activeSubscriptionExpiresAt
+                  ? new Date(activeSubscriptionExpiresAt).toLocaleDateString('en-KE', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })
+                  : null;
+                return (
+                  <PressableScale
+                    style={styles.profileRow}
+                    onPress={() => {
+                      HapticMap.light();
+                      if (rentalSubscriptionActive) {
+                        setActiveTab('home');
+                        setActiveSegment('bnbs');
+                        setActiveService('bnbs');
+                        setStaysSubTab('rental');
+                        setHomeSheetStageAnimated('mid');
+                      } else {
+                        setSubscriptionSheetOpen(true);
+                      }
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      rentalSubscriptionActive
+                        ? `Keja rental plan active${planLabel ? `, ${planLabel}` : ''}`
+                        : 'Subscribe to Keja rentals'
+                    }
+                  >
+                    <View
+                      style={[
+                        styles.profileRowIcon,
+                        {
+                          backgroundColor: rentalSubscriptionActive
+                            ? `${SERVICE_DOT_COLORS.stay}22`
+                            : theme.mutedSurface,
+                        },
+                      ]}
+                    >
+                      <AppIcon
+                        name="home"
+                        size={18}
+                        color={rentalSubscriptionActive ? SERVICE_DOT_COLORS.stay : theme.textSecondary}
+                      />
+                    </View>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <AccessibleText style={[styles.makeProfileRowLabel, { color: theme.textPrimary }]}>
+                        Keja rentals
+                      </AccessibleText>
+                      <AccessibleText
+                        style={[styles.makeTripSub, { color: theme.textSecondary }]}
+                        numberOfLines={1}
+                      >
+                        {rentalSubscriptionActive
+                          ? `${planLabel ?? 'Plan'} · active${expiresLabel ? ` · until ${expiresLabel}` : ''}`
+                          : 'Not subscribed · unlock viewing requests'}
+                      </AccessibleText>
+                    </View>
+                    {rentalSubscriptionActive ? (
+                      <View style={[styles.profileSubBadge, { backgroundColor: `${theme.primary}18` }]}>
+                        <AccessibleText style={[styles.profileSubBadgeText, { color: theme.primary }]}>
+                          Active
+                        </AccessibleText>
+                      </View>
+                    ) : (
+                      <AccessibleText style={[styles.makeTripSub, { color: theme.primary }]}>
+                        Plans
+                      </AccessibleText>
+                    )}
+                  </PressableScale>
+                );
+              })()}
             </View>
 
             <View style={[styles.profileGroup, nestSurface]}>
@@ -15623,6 +15708,16 @@ const createStyles = (theme: Theme) =>
       fontFamily: 'Inter_700Bold',
       letterSpacing: 0.6,
       textTransform: 'uppercase',
+    },
+    profileSubBadge: {
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      borderRadius: 999,
+    },
+    profileSubBadgeText: {
+      fontSize: 11,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: 0.2,
     },
     makeTripsHeaderRow: {
       flexDirection: 'row',

@@ -11,29 +11,26 @@ type Options = {
 };
 
 /**
- * Keeps Android window + navigation bar painted the app canvas color edge-to-edge.
- * Prevents the default white system strip below the React tree.
+ * Keeps Android chrome aligned with the app canvas.
+ * With edge-to-edge enabled (app.json), NavigationBar position/background
+ * APIs are unsupported — only button style is safe to set.
  */
 export function useChromeInsets({ backgroundColor, isDark }: Options) {
   const insets = useSafeAreaInsets();
   const bottomInset = getBottomInset(insets);
 
   useEffect(() => {
-    void SystemUI.setBackgroundColorAsync(backgroundColor);
+    void SystemUI.setBackgroundColorAsync(backgroundColor).catch(() => {
+      /* unavailable on some builds */
+    });
   }, [backgroundColor]);
 
   useEffect(() => {
     if (Platform.OS !== 'android') return;
-    void (async () => {
-      try {
-        await NavigationBar.setPositionAsync('absolute');
-        await NavigationBar.setBackgroundColorAsync(backgroundColor);
-        await NavigationBar.setButtonStyleAsync(isDark ? 'light' : 'dark');
-      } catch {
-        /* unavailable on some builds */
-      }
-    })();
-  }, [backgroundColor, isDark]);
+    void NavigationBar.setButtonStyleAsync(isDark ? 'light' : 'dark').catch(() => {
+      /* unavailable on some builds */
+    });
+  }, [isDark]);
 
   return { insets, bottomInset };
 }

@@ -1,4 +1,4 @@
-import { Easing, LayoutAnimation } from 'react-native';
+import { Easing, LayoutAnimation, Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
 
 /**
@@ -31,8 +31,11 @@ export const Motion = {
 
 export type LayoutAnimationKind = 'sheet' | 'segment' | 'filter';
 
-/** Shared LayoutAnimation presets — sheet snap, service swipe, filter collapse. */
+/** Shared LayoutAnimation presets — sheet snap, service swipe, filter collapse.
+ * On New Architecture, LayoutAnimation is a no-op on Android; still fine on iOS.
+ */
 export function configureLayoutAnimation(kind: LayoutAnimationKind = 'sheet') {
+  if (Platform.OS === 'android') return;
   const duration =
     kind === 'segment'
       ? Motion.duration.normal
