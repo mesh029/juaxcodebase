@@ -9742,28 +9742,30 @@ export default function App() {
                 ) : null}
               </View>
               {homeDeepPage === 'listings' ? (
-                <ListingsExplorePanel
-                  theme={theme}
-                  darkMode={theme.isDark}
-                  collapsed={listingsFiltersCollapsed}
-                  listingsViewMode={listingsViewMode}
-                  onViewModeChange={setListingsViewMode}
-                  listingCatalog={listingCatalog}
-                  onListingCatalogChange={setListingCatalog}
-                  listingCounty={listingCounty}
-                  onListingCountyChange={handleListingCountyChange}
-                  listingAreaChips={listingAreaChips}
-                  countyLabel={listingCountyChipLabel}
-                  listingRadiusKm={listingRadiusKm}
-                  onListingRadiusChange={(km) =>
-                    setListingRadiusKm(km as (typeof STAYS_RADIUS_OPTIONS)[number])
-                  }
-                  radiusOptions={LISTING_RADIUS_OPTIONS}
-                  showRadiusChips={listingCounty === 'near_me'}
-                  locationReady={!!currentCoords}
-                  onRequestLocation={() => void fetchCurrentLocation()}
-                  resultCount={(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length}
-                />
+                <View style={styles.listingsExploreChrome}>
+                  <ListingsExplorePanel
+                    theme={theme}
+                    darkMode={theme.isDark}
+                    collapsed={listingsFiltersCollapsed}
+                    listingsViewMode={listingsViewMode}
+                    onViewModeChange={setListingsViewMode}
+                    listingCatalog={listingCatalog}
+                    onListingCatalogChange={setListingCatalog}
+                    listingCounty={listingCounty}
+                    onListingCountyChange={handleListingCountyChange}
+                    listingAreaChips={listingAreaChips}
+                    countyLabel={listingCountyChipLabel}
+                    listingRadiusKm={listingRadiusKm}
+                    onListingRadiusChange={(km) =>
+                      setListingRadiusKm(km as (typeof STAYS_RADIUS_OPTIONS)[number])
+                    }
+                    radiusOptions={LISTING_RADIUS_OPTIONS}
+                    showRadiusChips={listingCounty === 'near_me'}
+                    locationReady={!!currentCoords}
+                    onRequestLocation={() => void fetchCurrentLocation()}
+                    resultCount={(listingCatalog === 'bnb' ? catalogBnbs : catalogHouses).length}
+                  />
+                </View>
               ) : null}
               {homeDeepPage === 'service-map' ? (
                 <View style={styles.serviceMapBody}>
@@ -14825,6 +14827,12 @@ const createStyles = (theme: Theme) =>
     },
     homeDeepHeader: {
       marginBottom: 8,
+      flexShrink: 0,
+    },
+    listingsExploreChrome: {
+      flexShrink: 0,
+      zIndex: 2,
+      backgroundColor: theme.background,
     },
     homeDeepMapTitle: {
       marginTop: 6,

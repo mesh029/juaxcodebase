@@ -57,6 +57,8 @@ type ListingsExplorePanelProps = {
 function areaChipLabel(key: string, countyLabel?: string): string {
   if (key === 'near_me') return 'Near me';
   if (key === 'any') return 'All';
+  // County chip: prefer live GPS place name, else capitalize the county key
+  // (e.g. mombasa → Mombasa). Never hardcode a town.
   if (countyLabel) return countyLabel;
   return `${key.charAt(0).toUpperCase()}${key.slice(1)}`;
 }
@@ -108,9 +110,11 @@ export function ListingsExplorePanel({
 
   return (
     <View style={[styles.root, collapsed ? styles.rootCollapsed : null]}>
-      <View style={styles.watermark} pointerEvents="none" accessibilityElementsHidden>
-        <AppIcon name={isBnb ? 'stays' : 'home'} size={160} color={watermarkColor} />
-      </View>
+      {!collapsed ? (
+        <View style={styles.watermark} pointerEvents="none" accessibilityElementsHidden>
+          <AppIcon name={isBnb ? 'stays' : 'home'} size={160} color={watermarkColor} />
+        </View>
+      ) : null}
 
       <View style={styles.headerRow}>
         <View style={styles.headerText}>
@@ -162,70 +166,90 @@ export function ListingsExplorePanel({
         </View>
       </View>
 
-      <View style={styles.choiceRow}>
-        <PressableScale
-          accessibilityRole="button"
-          accessibilityLabel={chipLabel('BnBs', isBnb)}
-          accessibilityState={{ selected: isBnb }}
-          style={[
-            styles.choiceCard,
-            nestSurface,
-            isBnb && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
-          ]}
-          onPress={() => {
-            if (!isBnb) {
-              HapticMap.selection();
-              onListingCatalogChange('bnb');
-            }
-          }}
-        >
-          <View
+      {!collapsed ? (
+        <View style={styles.choiceRow}>
+          <PressableScale
+            accessibilityRole="button"
+            accessibilityLabel={chipLabel('BnBs', isBnb)}
+            accessibilityState={{ selected: isBnb }}
             style={[
-              styles.choiceIconWell,
-              { backgroundColor: isBnb ? `${theme.primary}22` : theme.mutedSurface },
+              styles.choiceCard,
+              nestSurface,
+              isBnb && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
             ]}
+            onPress={() => {
+              if (!isBnb) {
+                HapticMap.selection();
+                onListingCatalogChange('bnb');
+              }
+            }}
           >
-            <AppIcon name="stays" size={22} color={isBnb ? theme.primary : theme.textSecondary} />
-          </View>
-          <AccessibleText style={[styles.choiceTitle, { color: isBnb ? theme.primary : theme.textPrimary }]}>
-            BnBs
-          </AccessibleText>
-          <AccessibleText style={[styles.choiceSub, { color: theme.textSecondary }]}>Short stays</AccessibleText>
-        </PressableScale>
-        <PressableScale
-          accessibilityRole="button"
-          accessibilityLabel={chipLabel('Rentals', !isBnb)}
-          accessibilityState={{ selected: !isBnb }}
-          style={[
-            styles.choiceCard,
-            nestSurface,
-            !isBnb && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
-          ]}
-          onPress={() => {
-            if (isBnb) {
-              HapticMap.selection();
-              onListingCatalogChange('house');
-            }
-          }}
-        >
-          <View
+            <View style={styles.choiceInner}>
+              <View
+                style={[
+                  styles.choiceIconWell,
+                  { backgroundColor: isBnb ? `${theme.primary}22` : theme.mutedSurface },
+                ]}
+              >
+                <AppIcon name="stays" size={20} color={isBnb ? theme.primary : theme.textSecondary} />
+              </View>
+              <View style={styles.choiceCopy}>
+                <AccessibleText
+                  style={[styles.choiceTitle, { color: isBnb ? theme.primary : theme.textPrimary }]}
+                >
+                  BnBs
+                </AccessibleText>
+                <AccessibleText style={[styles.choiceSub, { color: theme.textSecondary }]} numberOfLines={1}>
+                  Short stays
+                </AccessibleText>
+              </View>
+            </View>
+          </PressableScale>
+          <PressableScale
+            accessibilityRole="button"
+            accessibilityLabel={chipLabel('Rentals', !isBnb)}
+            accessibilityState={{ selected: !isBnb }}
             style={[
-              styles.choiceIconWell,
-              { backgroundColor: !isBnb ? `${theme.primary}22` : theme.mutedSurface },
+              styles.choiceCard,
+              nestSurface,
+              !isBnb && { borderColor: theme.primary, backgroundColor: theme.primaryLight },
             ]}
+            onPress={() => {
+              if (isBnb) {
+                HapticMap.selection();
+                onListingCatalogChange('house');
+              }
+            }}
           >
-            <AppIcon name="home" size={22} color={!isBnb ? theme.primary : theme.textSecondary} />
-          </View>
-          <AccessibleText style={[styles.choiceTitle, { color: !isBnb ? theme.primary : theme.textPrimary }]}>
-            Rentals
-          </AccessibleText>
-          <AccessibleText style={[styles.choiceSub, { color: theme.textSecondary }]}>Longer stay</AccessibleText>
-        </PressableScale>
-      </View>
+            <View style={styles.choiceInner}>
+              <View
+                style={[
+                  styles.choiceIconWell,
+                  { backgroundColor: !isBnb ? `${theme.primary}22` : theme.mutedSurface },
+                ]}
+              >
+                <AppIcon name="home" size={20} color={!isBnb ? theme.primary : theme.textSecondary} />
+              </View>
+              <View style={styles.choiceCopy}>
+                <AccessibleText
+                  style={[styles.choiceTitle, { color: !isBnb ? theme.primary : theme.textPrimary }]}
+                >
+                  Rentals
+                </AccessibleText>
+                <AccessibleText style={[styles.choiceSub, { color: theme.textSecondary }]} numberOfLines={1}>
+                  Longer stay
+                </AccessibleText>
+              </View>
+            </View>
+          </PressableScale>
+        </View>
+      ) : null}
 
+      <View style={styles.areaBlock}>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
+        style={styles.areaScroll}
         contentContainerStyle={styles.areaRow}
         accessibilityRole="tablist"
         accessibilityLabel="Area filter"
@@ -278,6 +302,7 @@ export function ListingsExplorePanel({
           </Pressable>
         ) : null}
       </ScrollView>
+      </View>
 
       {showRadiusChips && !locationReady && !collapsed ? (
         <Pressable
@@ -362,18 +387,22 @@ export function ListingsExplorePanel({
 const styles = StyleSheet.create({
   root: {
     position: 'relative',
-    overflow: 'hidden',
+    // Never let the listings list below compress this chrome — that was clipping
+    // the BnB/Rental cards so area chips looked stacked on top of them.
+    flexShrink: 0,
     marginTop: Spacing[0.5],
     marginBottom: Spacing[1.5],
     gap: Spacing[1.5],
   },
   rootCollapsed: {
     marginBottom: Spacing[1],
+    gap: Spacing[1],
   },
   watermark: {
     position: 'absolute',
     right: -24,
     top: -8,
+    zIndex: 0,
     transform: [{ rotate: '-12deg' }],
   },
   headerRow: {
@@ -382,6 +411,7 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     gap: Spacing[1],
     paddingRight: 8,
+    zIndex: 1,
   },
   headerText: {
     flex: 1,
@@ -416,15 +446,25 @@ const styles = StyleSheet.create({
   },
   choiceRow: {
     flexDirection: 'row',
+    alignItems: 'stretch',
     gap: Spacing[1],
+    zIndex: 2,
+    marginBottom: 2,
   },
   choiceCard: {
     flex: 1,
     borderRadius: 14,
     borderWidth: 1.5,
-    padding: Spacing[1.5],
-    gap: 4,
-    minHeight: 96,
+    minHeight: 68,
+    overflow: 'hidden',
+  },
+  choiceInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    gap: 10,
+    minHeight: 68,
   },
   choiceIconWell: {
     width: 40,
@@ -432,7 +472,11 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 2,
+  },
+  choiceCopy: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
   },
   choiceTitle: {
     fontSize: 15,
@@ -441,6 +485,14 @@ const styles = StyleSheet.create({
   choiceSub: {
     fontSize: 12,
     fontFamily: FontFamily.regular,
+  },
+  areaBlock: {
+    zIndex: 1,
+    flexShrink: 0,
+  },
+  areaScroll: {
+    flexGrow: 0,
+    flexShrink: 0,
   },
   areaRow: {
     flexDirection: 'row',
@@ -458,6 +510,7 @@ const styles = StyleSheet.create({
   },
   distanceChip: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: 4,
   },
   areaChipText: {

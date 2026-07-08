@@ -17,7 +17,8 @@ type Props = Omit<PressableProps, 'style'> & {
 
 /**
  * Subtle scale feedback for tappable cards and primary actions.
- * Fast (150ms), native-driver, no decorative bounce.
+ * Layout styles stay on the Pressable so flex/minHeight work; only scale
+ * runs on the inner Animated.View (native driver).
  */
 export function PressableScale({
   children,
@@ -42,6 +43,7 @@ export function PressableScale({
   return (
     <Pressable
       disabled={disabled}
+      style={style}
       onPressIn={(event) => {
         if (!disabled) runScale(scaleTo);
         onPressIn?.(event);
@@ -52,7 +54,7 @@ export function PressableScale({
       }}
       {...rest}
     >
-      <Animated.View style={[style, { transform: [{ scale }] }]}>{children}</Animated.View>
+      <Animated.View style={{ transform: [{ scale }] }}>{children}</Animated.View>
     </Pressable>
   );
 }
