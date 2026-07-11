@@ -5,6 +5,7 @@ import { Fragment, ReactNode, useCallback, useEffect, useLayoutEffect, useMemo, 
 import { useFonts, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold } from '@expo-google-fonts/inter';
 import {
   ActivityIndicator,
+  Animated,
   AppState,
   BackHandler,
   Dimensions,
@@ -446,8 +447,46 @@ type Theme = {
   isDark: boolean;
 };
 
-const MAPBOX_ACCESS_TOKEN =
-  process.env.EXPO_PUBLIC_MAPBOX_TOKEN || process.env.NEXT_PUBLIC_MAPBOX_TOKEN || '';
+/** Resolve a usable Mapbox token — treat the .env.example placeholder (and any
+ * non-`pk.` value) as absent so the UI shows the "add token" fallback instead of
+ * silently rendering a blank map with an unauthenticated token. */
+function resolveMapboxToken(): string {
+  const raw = (
+    process.env.EXPO_PUBLIC_MAPBOX_TOKEN ||
+    process.env.NEXT_PUBLIC_MAPBOX_TOKEN ||
+    ''
+  ).trim();
+  if (!raw.startsWith('pk.')) return '';
+  if (raw.includes('your_mapbox_public_token') || raw.includes('YOUR_MAPBOX')) return '';
+  return raw;
+}
+
+const MAPBOX_ACCESS_TOKEN = resolveMapboxToken();
+
+/**
+ * Wraps a card and gently pulses (scale) while `active` is true — used to draw
+ * the eye to follow-up cards that have a new, unread admin message. The pulse
+ * stops the moment the card is viewed/opened (active flips to false).
+ */
+function PulsingCard({ active, children }: { active: boolean; children: ReactNode }) {
+  const pulse = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (!active) {
+      pulse.stopAnimation(() => pulse.setValue(0));
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 720, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0, duration: 720, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [active, pulse]);
+  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, active ? 1.02 : 1] });
+  return <Animated.View style={{ transform: [{ scale }] }}>{children}</Animated.View>;
+}
 
 /** Android: WebView must receive touches; nested scroll + hardware layer helps Mapbox GL in WebView. */
 const ANDROID_MAP_WEBVIEW_PROPS: Partial<
@@ -4370,19 +4409,44 @@ export default function App() {
       setListingRequests([]);
       return;
     }
+    let baseRequests: ListingRequest[];
     try {
       const { requests } = await fetchMyListingRequests();
-      setListingRequests((previous) =>
-        requests.map((incoming) =>
-          mergeListingRequestWithLocalMessages(
-            previous.find((row) => row.id === incoming.id),
-            incoming,
-          ),
-        ),
-      );
+      baseRequests = requests;
     } catch {
       // Keep existing in-memory requests; legacy feedback fallback is deprecated.
+      return;
     }
+
+    // The list endpoint omits message threads, so a plain list reload can never
+    // detect a new admin/system reply. Hydrate messages for active requests via
+    // the detail endpoint so notifications track in real time even when no chat
+    // sheet is open. Bounded to keep the poll light.
+    const activeIds = baseRequests
+      .filter((r) => isActiveListingRequest(r.status))
+      .slice(0, 20)
+      .map((r) => r.id);
+    const messagesById = new Map<string, ListingRequestMessage[]>();
+    if (activeIds.length > 0) {
+      const details = await Promise.allSettled(activeIds.map((id) => fetchListingRequest(id)));
+      details.forEach((res, i) => {
+        if (res.status === 'fulfilled' && res.value?.request) {
+          messagesById.set(activeIds[i], res.value.request.messages ?? []);
+        }
+      });
+    }
+
+    setListingRequests((previous) =>
+      baseRequests.map((incoming) => {
+        const hydrated = messagesById.has(incoming.id)
+          ? { ...incoming, messages: messagesById.get(incoming.id) }
+          : incoming;
+        return mergeListingRequestWithLocalMessages(
+          previous.find((row) => row.id === incoming.id),
+          hydrated,
+        );
+      }),
+    );
   }, [isAuthed]);
 
   const lastSeenReqStatusRef = useRef(new Map<string, string>());
@@ -4428,6 +4492,23 @@ export default function App() {
     },
     [laundryOrders, bumpActivityViewed],
   );
+
+  /** Mark every current request/order/stay as seen — used to clear the unread
+   * section badge once the user has actually viewed the notifications. */
+  const markAllActivityViewed = useCallback(() => {
+    const viewed = activityViewedRef.current;
+    for (const req of listingRequests) {
+      viewed.requestStatus.set(req.id, req.status);
+      viewed.requestMessages.set(req.id, listingRequestMessageKey(req));
+    }
+    for (const order of laundryOrders) {
+      viewed.laundryStatus.set(order.id, `${order.status}:${order.currentStep}`);
+    }
+    for (const booking of bnbBookings) {
+      viewed.stayStatus.set(booking.id, booking.status);
+    }
+    bumpActivityViewed();
+  }, [listingRequests, laundryOrders, bnbBookings, bumpActivityViewed]);
 
   const activityFeedItems = useMemo((): ActivityFeedItem[] => {
     if (!activityViewPrimedRef.current) return [];
@@ -4542,6 +4623,35 @@ export default function App() {
     }
     return map;
   }, [activityFeedItems]);
+
+  /** Latest message + unread state per listing request, so a follow-up card can
+   * surface *which* request has an admin message (not just a bare badge count). */
+  const listingRequestChatInfo = useMemo(() => {
+    const map = new Map<
+      string,
+      { preview: string; fromAdmin: boolean; unread: boolean; timeLabel: string }
+    >();
+    const viewed = activityViewedRef.current;
+    for (const req of listingRequests) {
+      const latest = req.messages?.[req.messages.length - 1];
+      if (!latest) continue;
+      const fromAdmin = latest.senderRole === 'admin' || latest.senderRole === 'system';
+      const unread =
+        fromAdmin && listingRequestMessageKey(req) !== viewed.requestMessages.get(req.id);
+      map.set(req.id, {
+        preview: latest.body,
+        fromAdmin,
+        unread,
+        timeLabel: new Date(latest.createdAt).toLocaleString('en-KE', {
+          month: 'short',
+          day: 'numeric',
+          hour: 'numeric',
+          minute: '2-digit',
+        }),
+      });
+    }
+    return map;
+  }, [listingRequests, activityViewedTick]);
 
   const reloadLaundryOrders = useCallback(async () => {
     if (!isAuthed) return;
@@ -4668,6 +4778,17 @@ export default function App() {
     setActivityBellCount(0);
     setActivityChatCount(0);
   }, [isAuthed, activeTab]);
+
+  // Once the user is actually looking at the Follow-up section (where new
+  // notifications surface), give them a moment to see the highlighted items,
+  // then mark everything seen so the unread numbers clear and don't linger.
+  useEffect(() => {
+    if (!isAuthed) return;
+    if (activeTab !== 'activity' || activitySection !== 'active') return;
+    if (activityFeedItems.length === 0) return;
+    const t = setTimeout(() => markAllActivityViewed(), 1600);
+    return () => clearTimeout(t);
+  }, [isAuthed, activeTab, activitySection, activityFeedItems, markAllActivityViewed]);
 
   useEffect(() => {
     if (!isAuthed) return;
@@ -6594,7 +6715,15 @@ export default function App() {
         const pendingPayments = laundryOrders.filter(
           (o) => o.paymentStatus === 'pending' || o.paymentStatus === 'unpaid',
         );
-        const openRequests = listingRequests.filter((r) => isActiveListingRequest(r.status));
+        const openRequests = listingRequests
+          .filter((r) => isActiveListingRequest(r.status))
+          // Cards with a new (unread) admin message float to the top so the
+          // pulsing "new activity" cards are the first thing you see.
+          .sort((a, b) => {
+            const aUnread = listingRequestChatInfo.get(a.id)?.unread ? 1 : 0;
+            const bUnread = listingRequestChatInfo.get(b.id)?.unread ? 1 : 0;
+            return bUnread - aUnread;
+          });
         const listingRequestStepLabels = LISTING_REQUEST_STEPS.map((s) => LISTING_REQUEST_STATUS_LABELS[s]);
 
         const handleActivityFeedPress = (item: ActivityFeedItem) => {
@@ -6609,6 +6738,81 @@ export default function App() {
           if (item.entity === 'laundry') {
             markLaundryOrderViewed(item.entityId);
           }
+        };
+
+        const notifRed = theme.isDark ? '#F87171' : '#DC2626';
+
+        /** Follow-up card for a listing request — surfaces the latest admin
+         * message + an unread badge so you can see *which* service has a message. */
+        const renderOpenRequestCard = (req: ListingRequest, keyPrefix: string) => {
+          const statusLabel =
+            req.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[req.status] ?? req.status;
+          const kindLabel =
+            req.kind === 'tour' ? 'Tour' : req.kind === 'viewing' ? 'Viewing' : 'Stay';
+          const chat = listingRequestChatInfo.get(req.id);
+          const hasNewMessage = !!chat?.unread;
+          return (
+            <PulsingCard key={`${keyPrefix}-${req.id}`} active={hasNewMessage}>
+            <PressableScale
+              onPress={() => void openListingRequestDetail(req.id)}
+              style={[
+                styles.activityCardWrap,
+                nestedChrome(themeMode === 'dark'),
+                hasNewMessage ? { borderColor: notifRed, borderWidth: 1 } : null,
+              ]}
+            >
+              {hasNewMessage ? (
+                <View style={[styles.activityNewBanner, { backgroundColor: notifRed }]}>
+                  <Ionicons name="chatbubble-ellipses" size={12} color="#FFFFFF" />
+                  <AccessibleText style={styles.activityNewBannerText} numberOfLines={1}>
+                    New message from admin — tap to reply
+                  </AccessibleText>
+                </View>
+              ) : null}
+              <View style={styles.activityCardRow}>
+                <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
+                  <AppIcon name="home" size={18} color={SERVICE_DOT_COLORS.stay} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <AccessibleText
+                    style={[styles.makeTripTitle, { color: theme.textPrimary }]}
+                    numberOfLines={1}
+                  >
+                    {req.listingTitle}
+                  </AccessibleText>
+                  <AccessibleText
+                    style={[styles.makeTripSub, { color: theme.textSecondary }]}
+                    numberOfLines={1}
+                  >
+                    {kindLabel} · {statusLabel}
+                  </AccessibleText>
+                  {chat?.fromAdmin ? (
+                    <View style={styles.activityMsgPreviewRow}>
+                      <Ionicons
+                        name="chatbubble-ellipses-outline"
+                        size={13}
+                        color={hasNewMessage ? notifRed : theme.textMuted}
+                      />
+                      <AccessibleText
+                        style={[
+                          styles.activityMsgPreviewText,
+                          {
+                            color: hasNewMessage ? theme.textPrimary : theme.textSecondary,
+                            fontFamily: hasNewMessage ? 'Inter_600SemiBold' : 'Inter_400Regular',
+                          },
+                        ]}
+                        numberOfLines={1}
+                      >
+                        {chat.preview}
+                      </AccessibleText>
+                    </View>
+                  ) : null}
+                </View>
+                <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
+              </View>
+            </PressableScale>
+            </PulsingCard>
+          );
         };
 
         const activeItems = [
@@ -6678,7 +6882,7 @@ export default function App() {
         const kejaActive = activeItems.filter((t) => t.type === 'stay');
         const fuaUpdates = activityFeedItems.filter((i) => i.entity === 'laundry');
         const kejaUpdates = [
-          ...activityFeedItems.filter((i) => i.entity === 'stay' || i.entity === 'listing_request'),
+          ...activityFeedItems.filter((i) => i.entity === 'stay'),
           ...openRequests,
         ];
         const followUpCount =
@@ -6687,12 +6891,19 @@ export default function App() {
           pendingPayments.length +
           fuaUpdates.length +
           openRequests.length +
-          activityFeedItems.filter((i) => i.entity === 'stay' || i.entity === 'listing_request').length;
+          activityFeedItems.filter((i) => i.entity === 'stay').length;
         const byServiceCount = fuaActive.length + kejaActive.length + openRequests.length;
-        const sectionTabs: { key: typeof activitySection; label: string; count: number }[] = [
-          { key: 'active', label: 'Follow-up', count: followUpCount },
-          { key: 'updates', label: 'By service', count: byServiceCount },
-          { key: 'history', label: 'Past', count: historyItems.length },
+        // Genuine unread notifications live in the Follow-up section.
+        const followUpUnread = activityFeedItems.length;
+        const sectionTabs: {
+          key: typeof activitySection;
+          label: string;
+          count: number;
+          unread: number;
+        }[] = [
+          { key: 'active', label: 'Follow-up', count: followUpCount, unread: followUpUnread },
+          { key: 'updates', label: 'By service', count: byServiceCount, unread: 0 },
+          { key: 'history', label: 'Past', count: historyItems.length, unread: 0 },
         ];
 
         const renderServiceHeader = (label: string, icon: AppIconName, color: string, count: number) => (
@@ -6749,12 +6960,18 @@ export default function App() {
             <View style={[styles.activityTabs, { backgroundColor: theme.mutedSurface }]}>
               {sectionTabs.map((tab) => {
                 const on = activitySection === tab.key;
+                const hasUnread = tab.unread > 0;
                 return (
                   <PressableScale
                     key={tab.key}
                     accessibilityRole="tab"
                     accessibilityState={{ selected: on }}
-                    style={[styles.activityTab, on && { backgroundColor: theme.primaryLight }]}
+                    accessibilityLabel={hasUnread ? `${tab.label}, ${tab.unread} new` : tab.label}
+                    style={[
+                      styles.activityTab,
+                      on && { backgroundColor: theme.primaryLight },
+                      !on && hasUnread && { borderWidth: 1, borderColor: notifRed },
+                    ]}
                     onPress={() => {
                       HapticMap.selection();
                       setActivitySection(tab.key);
@@ -6763,12 +6980,19 @@ export default function App() {
                     <AccessibleText
                       style={[
                         styles.activityTabLabel,
-                        { color: on ? theme.primary : theme.textSecondary },
+                        { color: hasUnread && !on ? notifRed : on ? theme.primary : theme.textSecondary },
                       ]}
                     >
                       {tab.label}
-                      {tab.count > 0 ? ` · ${tab.count}` : ''}
+                      {!hasUnread && tab.count > 0 ? ` · ${tab.count}` : ''}
                     </AccessibleText>
+                    {hasUnread ? (
+                      <View style={[styles.activityTabUnread, { backgroundColor: notifRed }]}>
+                        <AccessibleText style={styles.activityTabUnreadText}>
+                          {tab.unread > 9 ? '9+' : String(tab.unread)}
+                        </AccessibleText>
+                      </View>
+                    ) : null}
                   </PressableScale>
                 );
               })}
@@ -6879,10 +7103,10 @@ export default function App() {
                           'Keja',
                           'home',
                           SERVICE_DOT_COLORS.stay,
-                          kejaActive.length + openRequests.length + activityFeedItems.filter((i) => i.entity === 'stay' || i.entity === 'listing_request').length,
+                          kejaActive.length + openRequests.length + activityFeedItems.filter((i) => i.entity === 'stay').length,
                         )}
                         {activityFeedItems
-                          .filter((i) => i.entity === 'stay' || i.entity === 'listing_request')
+                          .filter((i) => i.entity === 'stay')
                           .map((item) => (
                             <PressableScale
                               key={item.id}
@@ -6902,30 +7126,7 @@ export default function App() {
                               </View>
                             </PressableScale>
                           ))}
-                        {openRequests.map((req) => {
-                          const statusLabel =
-                            req.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[req.status] ?? req.status;
-                          return (
-                            <PressableScale
-                              key={`req-${req.id}`}
-                              onPress={() => void openListingRequestDetail(req.id)}
-                              style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
-                            >
-                              <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
-                                <AppIcon name="home" size={18} color={SERVICE_DOT_COLORS.stay} />
-                              </View>
-                              <View style={{ flex: 1 }}>
-                                <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
-                                  {req.listingTitle}
-                                </AccessibleText>
-                                <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                                  {req.kind === 'tour' ? 'Tour' : req.kind === 'viewing' ? 'Viewing' : 'Stay'} · {statusLabel}
-                                </AccessibleText>
-                              </View>
-                              <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
-                            </PressableScale>
-                          );
-                        })}
+                        {openRequests.map((req) => renderOpenRequestCard(req, 'req'))}
                         {kejaActive.map((trip) => (
                           <PressableScale
                             key={`keja-${trip.id}`}
@@ -7028,26 +7229,7 @@ export default function App() {
                           SERVICE_DOT_COLORS.stay,
                           kejaActive.length + openRequests.length,
                         )}
-                        {openRequests.map((req) => (
-                          <PressableScale
-                            key={`svc-req-${req.id}`}
-                            onPress={() => void openListingRequestDetail(req.id)}
-                            style={[styles.activityCard, nestedChrome(themeMode === 'dark')]}
-                          >
-                            <View style={[styles.activityIconWell, { backgroundColor: `${SERVICE_DOT_COLORS.stay}22` }]}>
-                              <AppIcon name="home" size={18} color={SERVICE_DOT_COLORS.stay} />
-                            </View>
-                            <View style={{ flex: 1 }}>
-                              <AccessibleText style={[styles.makeTripTitle, { color: theme.textPrimary }]} numberOfLines={1}>
-                                {req.listingTitle}
-                              </AccessibleText>
-                              <AccessibleText style={[styles.makeTripSub, { color: theme.textSecondary }]}>
-                                {req.kind === 'tour' ? 'Tour request' : req.kind === 'viewing' ? 'Viewing request' : 'Stay request'}
-                              </AccessibleText>
-                            </View>
-                            <Ionicons name="chevron-forward" size={16} color={theme.textMuted} />
-                          </PressableScale>
-                        ))}
+                        {openRequests.map((req) => renderOpenRequestCard(req, 'svc-req'))}
                         {kejaActive.map((trip) => (
                           <PressableScale
                             key={`svc-keja-${trip.id}`}
@@ -15602,13 +15784,28 @@ const createStyles = (theme: Theme) =>
       flex: 1,
       minHeight: 36,
       borderRadius: 10,
+      flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
+      gap: 6,
       paddingHorizontal: 8,
     },
     activityTabLabel: {
       fontSize: 13,
       fontFamily: 'Inter_600SemiBold',
+    },
+    activityTabUnread: {
+      minWidth: 18,
+      height: 18,
+      borderRadius: 9,
+      paddingHorizontal: 5,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    activityTabUnreadText: {
+      color: '#FFFFFF',
+      fontSize: 11,
+      fontFamily: 'Inter_700Bold',
     },
     activityCard: {
       flexDirection: 'row',
@@ -15619,6 +15816,33 @@ const createStyles = (theme: Theme) =>
       borderColor: theme.border,
       padding: 14,
       marginBottom: 10,
+    },
+    activityCardWrap: {
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: theme.border,
+      marginBottom: 10,
+      overflow: 'hidden',
+    },
+    activityCardRow: {
+      flexDirection: 'row',
+      alignItems: 'flex-start',
+      gap: 12,
+      padding: 14,
+    },
+    activityNewBanner: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: 12,
+      paddingVertical: 6,
+    },
+    activityNewBannerText: {
+      flex: 1,
+      color: '#FFFFFF',
+      fontSize: 11,
+      fontFamily: 'Inter_700Bold',
+      letterSpacing: 0.2,
     },
     activityIconWell: {
       width: 36,
@@ -15655,6 +15879,34 @@ const createStyles = (theme: Theme) =>
     activityServiceCountText: {
       fontSize: 12,
       fontFamily: 'Inter_600SemiBold',
+    },
+    activityCardTitleRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    activityMsgBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      borderRadius: 9,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+    },
+    activityMsgBadgeText: {
+      fontSize: 10,
+      fontFamily: 'Inter_700Bold',
+    },
+    activityMsgPreviewRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      marginTop: 4,
+    },
+    activityMsgPreviewText: {
+      flex: 1,
+      fontSize: 12,
+      lineHeight: 16,
     },
     profileHero: {
       flexDirection: 'row',

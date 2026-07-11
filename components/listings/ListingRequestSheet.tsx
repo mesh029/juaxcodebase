@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -49,6 +49,8 @@ export function ListingRequestSheet({
   theme,
 }: Props) {
   const [reply, setReply] = useState('');
+  const scrollRef = useRef<ScrollView>(null);
+  const inputRef = useRef<TextInput>(null);
 
   const stepIndex = useMemo(
     () => (request ? (request.stepIndex ?? listingRequestStepIndex(request.status)) : 0),
@@ -59,6 +61,18 @@ export function ListingRequestSheet({
     request?.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[request?.status ?? ''] ?? request?.status;
 
   const closed = request?.status === 'viewing_completed' || request?.status === 'cancelled';
+  const messageCount = request?.messages?.length ?? 0;
+
+  // When the sheet opens (or a new message lands), drop the user at the bottom of
+  // the thread with the reply box in view so they can respond immediately.
+  useEffect(() => {
+    if (!visible || loading || !request) return;
+    const t = setTimeout(() => {
+      scrollRef.current?.scrollToEnd({ animated: true });
+      if (!closed) inputRef.current?.focus();
+    }, 350);
+    return () => clearTimeout(t);
+  }, [visible, loading, request, closed, messageCount]);
 
   async function handleSend() {
     const text = reply.trim();
@@ -92,7 +106,11 @@ export function ListingRequestSheet({
             <ActivityIndicator color={theme.primary} />
           </View>
         ) : (
-          <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+          <ScrollView
+            ref={scrollRef}
+            contentContainerStyle={styles.body}
+            keyboardShouldPersistTaps="handled"
+          >
             <Text style={[styles.title, { color: theme.textPrimary }]}>{request.listingTitle}</Text>
             <Text style={[styles.status, { color: theme.primary }]}>{statusLabel}</Text>
             {request.riderName ? (
@@ -163,9 +181,10 @@ export function ListingRequestSheet({
             {!closed ? (
               <View style={styles.replyRow}>
                 <TextInput
+                  ref={inputRef}
                   value={reply}
                   onChangeText={setReply}
-                  placeholder="Optional reply to ops…"
+                  placeholder="Reply to ops…"
                   placeholderTextColor={theme.textMuted}
                   multiline
                   style={[
