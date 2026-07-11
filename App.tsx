@@ -256,6 +256,7 @@ function adaptHouseListingStubFromRequest(req: ListingRequest, county: CountyKey
     amenities: [],
     has3dTour: false,
     locationLocked: true,
+    isStub: true,
   };
 }
 
@@ -324,6 +325,10 @@ type HouseListing = {
   hostName?: string;
   hostPhone?: string;
   exactCoords?: Coordinates;
+  /** True when synthesized from a booking/request because the real listing is
+   * not in the current nearby payload. Such rows use fallback (county-center)
+   * coords and must be kept out of strict proximity/"near me" surfaces. */
+  isStub?: boolean;
 };
 type BnbListing = {
   id: string;
@@ -347,6 +352,7 @@ type BnbListing = {
   hostName?: string;
   hostPhone?: string;
   exactCoords?: Coordinates;
+  isStub?: boolean;
 };
 /** Curated city spots on Explore (hotels, meetups, retail — demo insight numbers). */
 type ExploreVenueCategory = 'hotel' | 'meetup' | 'fashion' | 'market' | 'culture';
@@ -2686,6 +2692,7 @@ export default function App() {
         amenities: [],
         has3dTour: false,
         locationLocked: true,
+        isStub: true,
       });
     }
     return Array.from(merged.values());
@@ -3127,13 +3134,19 @@ export default function App() {
   }, [currentCoords, currentCounty, pickupStations]);
   const mapBnbs = effectiveBnbListings;
   const mapHouses = effectiveHouseListings;
-  // Legacy/request stubs can carry approximate fallback coords; exclude them from strict "near me" surfaces.
+  // Booking/request stubs carry approximate (county-center) fallback coords, so
+  // their distance is meaningless — exclude them from strict "near me" surfaces.
+  // Match on the explicit stub flag (robust) and keep the legacy price checks as
+  // a fallback for any older rows that predate the flag.
   const proximityBnbs = useMemo(
-    () => mapBnbs.filter((row) => row.price !== 'Requested'),
+    () => mapBnbs.filter((row) => !row.isStub && row.price !== 'Requested' && row.price !== 'Booked'),
     [mapBnbs],
   );
   const proximityHouses = useMemo(
-    () => mapHouses.filter((row) => row.price !== 'Requested'),
+    () =>
+      mapHouses.filter(
+        (row) => !row.isStub && row.price !== 'Requested' && row.price !== 'Viewing requested',
+      ),
     [mapHouses],
   );
   const nearbyHouses = useMemo(() => {

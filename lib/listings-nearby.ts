@@ -37,7 +37,10 @@ export function buildProximityContext(
  * Single source of truth for “Near me” filtering.
  * - GPS: strict radius from user — never widen to whole county.
  * - Approximate (no GPS): radius from county center + county label match.
- * - Pinned ids are always included (booked / requested) but keep true distance for sort.
+ * - Pinned ids (booked / requested) are only re-included when they are still
+ *   within the search radius. They must never be force-injected into a strict
+ *   proximity surface once the user has moved out of range — otherwise reserved
+ *   or contacted listings linger in "Near me" from a previous location.
  */
 export function filterListingsByProximity<T extends { id: string; coords: Coordinates; county?: string }>(
   rows: T[],
@@ -81,6 +84,13 @@ export function filterListingsByProximity<T extends { id: string; coords: Coordi
   const seen = new Set(filtered.map((row) => row.id));
   for (const row of withDistance) {
     if (!pinnedIds.has(row.id) || seen.has(row.id)) continue;
+    // Only re-include a pinned listing when it is genuinely within range of the
+    // current reference. This lets a reserved/contacted place survive a county
+    // label mismatch while still in radius, but keeps it out of "Near me" once
+    // the user has moved away (or the pin has no resolvable distance).
+    if (ctx.reference) {
+      if (row.distanceKm == null || row.distanceKm > ctx.radiusKm) continue;
+    }
     filtered.push(row);
     seen.add(row.id);
   }

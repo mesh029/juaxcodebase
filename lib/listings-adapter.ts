@@ -41,6 +41,8 @@ export type AdaptedHouseListing = {
   hostName?: string;
   hostPhone?: string;
   exactCoords?: Coordinates;
+  /** Synthesized fallback row (county-center coords) — excluded from proximity. */
+  isStub?: boolean;
 };
 
 export type AdaptedBnbListing = {
@@ -66,6 +68,7 @@ export type AdaptedBnbListing = {
   hostName?: string;
   hostPhone?: string;
   exactCoords?: Coordinates;
+  isStub?: boolean;
 };
 
 export type AdaptedPlaceStation = {
@@ -126,6 +129,7 @@ export function adaptBnbListingStubFromBooking(booking: BnbBooking): AdaptedBnbL
     amenities: [],
     has3dTour: false,
     locationLocked: true,
+    isStub: true,
   };
 }
 
