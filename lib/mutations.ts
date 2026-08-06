@@ -187,7 +187,24 @@ export async function mutateMpesaIntent(body: {
 }): Promise<{ queued: boolean; result: MpesaIntentResponse | null }> {
   if (await canWriteOnline()) {
     try {
-      return { queued: false, result: await initiateMpesaPayment(body) };
+      const started = await initiateMpesaPayment(body);
+      if (started.intentId || started.checkoutRequestId) {
+        const id = started.intentId ?? started.checkoutRequestId!;
+        // Short poll for webhook / dev auto-complete — reuse existing pending UI.
+        for (let i = 0; i < 4; i++) {
+          await new Promise((r) => setTimeout(r, 700));
+          try {
+            const { fetchMpesaPaymentStatus } = await import('./api');
+            const status = await fetchMpesaPaymentStatus(id);
+            if (status.status === 'completed' || status.status === 'success') {
+              return { queued: false, result: { ...started, ...status, status: 'completed' } };
+            }
+          } catch {
+            break;
+          }
+        }
+      }
+      return { queued: false, result: started };
     } catch (err) {
       if (!(err instanceof ApiError && (err.code === 'network_error' || err.code === 'timeout' || err.status === 404))) {
         throw err;

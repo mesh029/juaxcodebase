@@ -34,4 +34,11 @@ Copy from `.env.example`. Set the same keys in EAS secrets for preview/productio
 | Apple Developer | Bundle id `com.juax.app` |
 | Google Play | Package `com.juax.app` |
 
-No other human tasks required for the overnight client hardening.
+## Also confirm infra is up
+
+| Check | Notes |
+|-------|--------|
+| Postgres / Aiven | Backend health returns `db: connected` — if Aiven sleeps/blocks, catalog APIs 503 and app uses offline cache |
+| Backend deploy | After merging juaxBackend overnight branch |
+
+No other human tasks for code hardening — Daraja / OTP / store accounts remain the account sign-ups above.

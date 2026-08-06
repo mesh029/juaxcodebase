@@ -222,9 +222,14 @@ See `docs/SHIP_CHECKLIST.md` — API URL, Mapbox, Daraja, Dropbox, OTP, EAS/stor
 
 ## Changelog note
 
-Perf extraction in this pass:
+Perf extraction:
 
-- `theme/appStyles.ts` — StyleSheet factory out of `App.tsx`
-- `lib/maps/htmlBuilders.ts` + `lib/maps/types.ts` — guidance / interactive HTML builders
-- `mapCoordsStable` — dampens WebView HTML rebuilds from GPS jitter
-- `App.tsx` ~16.3k → ~11.2k lines (same UI)
+- `theme/appStyles.ts`, `lib/maps/htmlBuilders.ts`, `mapCoordsStable`
+- `ActivityTab` + `ProfileTab` memoized components (same UI)
+- `App.tsx` ~16.3k → ~10.5k lines
+
+Backend overnight:
+
+- Persisted payment intents (memory + AppSetting), STK status poll, `/api/v1/webhooks/mpesa` idempotent stub
+- Device tokens persisted via AppSetting
+- Still needs: live Daraja keys, reachable Postgres (Aiven), OTP provider
