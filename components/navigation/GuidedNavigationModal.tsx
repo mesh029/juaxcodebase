@@ -29,11 +29,6 @@ type Props = {
   onClose: () => void;
 };
 
-const ANDROID_MAP_WEBVIEW_PROPS =
-  Platform.OS === 'android'
-    ? { overScrollMode: 'never' as const, nestedScrollEnabled: true, androidLayerType: 'hardware' as const }
-    : {};
-
 /** In-app route preview (Mapbox GL in WebView). Native Navigation SDK is production-only. */
 export function GuidedNavigationModal({
   visible,
@@ -45,8 +40,8 @@ export function GuidedNavigationModal({
   horizontalPad,
   onClose,
 }: Props) {
-  const canShow = visible && journey && guidanceMapHtml;
-  if (!canShow || !journey) return null;
+  const canShow = Boolean(visible && journey && guidanceMapHtml);
+  if (!canShow || !journey || !guidanceMapHtml) return null;
 
   return (
     <Modal visible={canShow} animationType="slide" presentationStyle="fullScreen" onRequestClose={onClose}>
@@ -88,7 +83,9 @@ export function GuidedNavigationModal({
           allowsFullscreenVideo
           setSupportMultipleWindows={false}
           geolocationEnabled
-          {...ANDROID_MAP_WEBVIEW_PROPS}
+          overScrollMode="never"
+          nestedScrollEnabled={Platform.OS === 'android'}
+          androidLayerType="hardware"
         />
       </View>
     </Modal>
@@ -104,19 +101,15 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  back: { fontSize: 16, fontWeight: '600', color: '#C9A227' },
+  back: { color: '#C9A227', fontWeight: '600', width: 72 },
   title: { fontSize: 16, fontWeight: '700' },
   destStrip: {
-    marginHorizontal: 12,
-    marginTop: 8,
-    marginBottom: 4,
-    padding: 12,
-    borderRadius: 12,
-    borderWidth: StyleSheet.hairlineWidth,
-    gap: 4,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
   },
-  eyebrow: { fontSize: 10, fontWeight: '800', letterSpacing: 1.4 },
-  destTitle: { fontSize: 16, fontWeight: '700' },
-  destSub: { fontSize: 13, lineHeight: 18 },
+  eyebrow: { fontSize: 10, fontWeight: '700', letterSpacing: 1.2 },
+  destTitle: { fontSize: 17, fontWeight: '700', marginTop: 4 },
+  destSub: { fontSize: 13, marginTop: 4 },
   map: { flex: 1 },
 });

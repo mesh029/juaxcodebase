@@ -7,7 +7,6 @@ import {
   Text,
   View,
 } from 'react-native';
-import { PRODUCTION_TODO } from '../../lib/production-todos';
 
 type Theme = {
   sheet: string;
@@ -100,7 +99,7 @@ export function BnbBookingSheet({
           </Pressable>
 
           <Text style={[styles.todoNote, { color: theme.textSecondary }]}>
-            {PRODUCTION_TODO.MPESA_BNB.split(': ')[1]}
+            M-Pesa STK via secure server when configured.
           </Text>
 
           <Pressable onPress={onClose} style={styles.cancelBtn} disabled={busy}>
