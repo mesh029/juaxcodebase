@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ApiError,
   fetchAppCatalog,
@@ -13,6 +14,8 @@ import {
   type AdaptedHouseListing,
   type AdaptedPlaceStation,
 } from '../lib/listings-adapter';
+import { cacheCatalog, loadCachedCatalog } from '../lib/offline/cache';
+import { checkApiHealth } from '../lib/offline/health';
 
 function dedupeById<T extends { id: string }>(items: T[]): T[] {
   const seen = new Set<string>();
@@ -25,10 +28,10 @@ function dedupeById<T extends { id: string }>(items: T[]): T[] {
 
 function formatListingsLoadError(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.code === 'network_error') {
+    if (err.code === 'network_error' || err.code === 'timeout') {
       return 'Listings could not load — check your internet connection and try again.';
     }
-    if (err.message.includes('EXPO_PUBLIC_API_BASE_URL')) {
+    if (err.message.includes('EXPO_PUBLIC_API_BASE_URL') || err.code === 'api_unconfigured') {
       return 'Listings could not load — the app is not connected to the server (missing API URL).';
     }
     if (err.status === 404) {
@@ -55,6 +58,7 @@ function applyCatalogListings(
 }
 
 export function useAppData() {
+  const queryClient = useQueryClient();
   const [houseListings, setHouseListings] = useState<AdaptedHouseListing[]>([]);
   const [bnbListings, setBnbListings] = useState<AdaptedBnbListing[]>([]);
   const [pickupStations, setPickupStations] = useState<AdaptedPlaceStation[]>([]);
@@ -70,6 +74,7 @@ export function useAppData() {
   const listingsRequestGenRef = useRef(0);
   const catalogLoadedRef = useRef(false);
   const listingsLoadedRef = useRef(false);
+  const hydratedRef = useRef(false);
 
   const applyCatalogToState = useCallback((catalog: Awaited<ReturnType<typeof fetchAppCatalog>>) => {
     const { rentals, bnbs } = applyCatalogListings(catalog);
@@ -86,14 +91,74 @@ export function useAppData() {
     setListingsError(null);
   }, []);
 
+  // Instant Home from durable cache
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const cached = await loadCachedCatalog();
+      if (cancelled || !cached) return;
+      applyCatalogToState(cached);
+      hydratedRef.current = true;
+      setDataLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyCatalogToState]);
+
+  const catalogQuery = useQuery({
+    queryKey: ['catalog', 'pilot'],
+    queryFn: async () => {
+      const health = await checkApiHealth();
+      if (health !== 'up') {
+        const cached = await loadCachedCatalog();
+        if (cached) return cached;
+        throw new ApiError('API unavailable', 'network_error');
+      }
+      const catalog = await fetchAppCatalog('pilot');
+      await cacheCatalog(catalog);
+      return catalog;
+    },
+    staleTime: 10 * 60 * 1000,
+    gcTime: 60 * 60 * 1000,
+    retry: 1,
+  });
+
+  useEffect(() => {
+    if (catalogQuery.data) {
+      applyCatalogToState(catalogQuery.data);
+      setDataLoading(false);
+      setDataError(null);
+    } else if (catalogQuery.error && !listingsLoadedRef.current) {
+      setDataError(
+        catalogQuery.error instanceof Error ? catalogQuery.error.message : 'Could not load app data',
+      );
+      setListingsError(formatListingsLoadError(catalogQuery.error));
+      setDataLoading(false);
+    } else if (catalogQuery.isFetched) {
+      setDataLoading(false);
+    }
+  }, [catalogQuery.data, catalogQuery.error, catalogQuery.isFetched, applyCatalogToState]);
+
   /** One bootstrap request — listings + stations + plans (never fan-out per county). */
   const refreshAppData = useCallback(async (county: string = 'pilot') => {
     const isInitial = !catalogLoadedRef.current;
     if (isInitial) setDataLoading(true);
     setDataError(null);
     try {
+      const health = await checkApiHealth();
+      if (health !== 'up') {
+        const cached = await loadCachedCatalog();
+        if (cached) {
+          applyCatalogToState(cached);
+          return;
+        }
+        throw new ApiError('API unavailable', 'network_error');
+      }
       const catalog = await fetchAppCatalog(county);
+      await cacheCatalog(catalog);
       applyCatalogToState(catalog);
+      await queryClient.invalidateQueries({ queryKey: ['catalog'] });
     } catch (err) {
       setDataError(err instanceof Error ? err.message : 'Could not load app data');
       if (!listingsLoadedRef.current) {
@@ -103,7 +168,7 @@ export function useAppData() {
       setDataLoading(false);
       setListingsFetching(false);
     }
-  }, [applyCatalogToState]);
+  }, [applyCatalogToState, queryClient]);
 
   const applyListingsResult = useCallback(
     (
@@ -133,7 +198,6 @@ export function useAppData() {
     [],
   );
 
-  /** Single-county refresh via bootstrap (1 HTTP request). */
   const refreshListingsCatalog = useCallback(async (county: string) => {
     const gen = ++listingsRequestGenRef.current;
     const isInitial = !listingsLoadedRef.current;
@@ -142,14 +206,22 @@ export function useAppData() {
     try {
       const catalog = await fetchAppCatalog(county);
       if (gen !== listingsRequestGenRef.current) return;
+      await cacheCatalog(catalog);
       const { rentals, bnbs } = applyCatalogListings(catalog);
       applyListingsResult(gen, true, rentals, bnbs);
     } catch (err) {
+      if (!listingsLoadedRef.current) {
+        const cached = await loadCachedCatalog();
+        if (cached) {
+          const { rentals, bnbs } = applyCatalogListings(cached);
+          applyListingsResult(gen, true, rentals, bnbs);
+          return;
+        }
+      }
       applyListingsResult(gen, false, [], [], err);
     }
   }, [applyListingsResult]);
 
-  /** All pilot counties — one bootstrap call (`county=pilot`), not 8 parallel listing requests. */
   const refreshAllListingsCatalog = useCallback(async () => {
     const gen = ++listingsRequestGenRef.current;
     const isInitial = !listingsLoadedRef.current;
@@ -158,9 +230,18 @@ export function useAppData() {
     try {
       const catalog = await fetchAppCatalog('pilot');
       if (gen !== listingsRequestGenRef.current) return;
+      await cacheCatalog(catalog);
       const { rentals, bnbs } = applyCatalogListings(catalog);
       applyListingsResult(gen, true, rentals, bnbs);
     } catch (err) {
+      if (!listingsLoadedRef.current) {
+        const cached = await loadCachedCatalog();
+        if (cached) {
+          const { rentals, bnbs } = applyCatalogListings(cached);
+          applyListingsResult(gen, true, rentals, bnbs);
+          return;
+        }
+      }
       applyListingsResult(gen, false, [], [], err);
     }
   }, [applyListingsResult]);
@@ -189,10 +270,6 @@ export function useAppData() {
     [applyListingsResult],
   );
 
-  useEffect(() => {
-    void refreshAppData('pilot');
-  }, [refreshAppData]);
-
   return {
     houseListings,
     bnbListings,
@@ -202,7 +279,7 @@ export function useAppData() {
     mamaFuaConvenienceTimes,
     subscriptionPlans,
     dataLoading,
-    listingsFetching,
+    listingsFetching: listingsFetching || catalogQuery.isFetching,
     listingsLoaded,
     dataError,
     listingsError,
@@ -211,4 +288,4 @@ export function useAppData() {
     refreshAllListingsCatalog,
     refreshNearbyListings,
   };
-};
+}
