@@ -6090,6 +6090,14 @@ export default function App() {
             openListingRequestDetail={openListingRequestDetail}
             openBookedStayDetail={openBookedStayDetail}
             markLaundryOrderViewed={markLaundryOrderViewed}
+            contentContainerStyle={{
+              paddingHorizontal: gutter,
+              paddingBottom: tabBarBottomPad + 28,
+            }}
+            refreshing={pullRefreshing}
+            onRefresh={() => void handlePullRefresh()}
+            refreshColor={theme.primary}
+            refreshBackground={theme.surface}
           />
         );
       }
@@ -6125,6 +6133,14 @@ export default function App() {
               setActiveTab('activity');
               setActivitySection('active');
             }}
+            contentContainerStyle={{
+              paddingHorizontal: gutter,
+              paddingBottom: tabBarBottomPad + 28,
+            }}
+            refreshing={pullRefreshing}
+            onRefresh={() => void handlePullRefresh()}
+            refreshColor={theme.primary}
+            refreshBackground={theme.surface}
           />
         );
       }
@@ -8467,6 +8483,10 @@ export default function App() {
           ) : null}
           <View style={styles.juxSheetScrollHost}>
             <View style={styles.juxSheetScrollClip}>
+          {activeTab === 'activity' || activeTab === 'profile' ? (
+            // Activity/Profile own their ScrollView — avoids nested scroll jank in Home sheet.
+            <View style={styles.juxSheetScroll}>{sheetInner}</View>
+          ) : (
           <ScrollView
             style={styles.juxSheetScroll}
             contentContainerStyle={[
@@ -8506,7 +8526,8 @@ export default function App() {
           >
             {sheetInner}
           </ScrollView>
-          {sheetFooter && sheetHasMoreBelow ? (
+          )}
+          {sheetFooter && sheetHasMoreBelow && activeTab === 'home' ? (
             <View style={[styles.sheetScrollCueWrap, { borderTopColor: theme.border }]} pointerEvents="none">
               <View style={[styles.sheetScrollCueFade, { backgroundColor: theme.sheet }]} />
               <Text style={[styles.sheetScrollCueText, { color: theme.textSecondary }]}>Scroll for more ↓</Text>

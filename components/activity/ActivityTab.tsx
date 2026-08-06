@@ -1,14 +1,13 @@
-import { memo, useMemo } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { memo } from 'react';
+import { Pressable, RefreshControl, ScrollView, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppIcon, type AppIconName } from '../ui/AppIcon';
 import { AccessibleText } from '../ui/AccessibleText';
 import { EmptyState } from '../ui/EmptyState';
 import { PressableScale } from '../ui/PressableScale';
-import { MakeStatusStepper } from '../make/shared';
+import { MakeStatusStepper, SERVICE_DOT_COLORS } from '../make/shared';
 import { FuaFeedbackCard } from '../feedback/FuaFeedbackCard';
 import { HapticMap, nestedChrome } from '../../theme';
-import { SERVICE_DOT_COLORS } from '../make/shared';
 import {
   isActiveListingRequest,
   LISTING_REQUEST_STATUS_LABELS,
@@ -47,6 +46,12 @@ export type ActivityTabProps = {
   openListingRequestDetail: (id: string) => void | Promise<void>;
   openBookedStayDetail: (id: string) => void | Promise<void>;
   markLaundryOrderViewed: (id: string) => void;
+  /** Own scroll host — avoids nesting inside Home sheet ScrollView (lag). */
+  contentContainerStyle?: StyleProp<ViewStyle>;
+  refreshing?: boolean;
+  onRefresh?: () => void;
+  refreshColor?: string;
+  refreshBackground?: string;
 };
 
 function ActivityTabInner({
@@ -67,6 +72,11 @@ function ActivityTabInner({
   openListingRequestDetail,
   openBookedStayDetail,
   markLaundryOrderViewed,
+  contentContainerStyle,
+  refreshing,
+  onRefresh,
+  refreshColor,
+  refreshBackground,
 }: ActivityTabProps) {
   const activityTabBadgeCount = activityBellCount + activityChatCount;
         const activeOrders = laundryOrders.filter(
@@ -198,7 +208,24 @@ function ActivityTabInner({
         );
 
         return (
-          <>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={contentContainerStyle}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            nestedScrollEnabled
+            refreshControl={
+              onRefresh ? (
+                <RefreshControl
+                  refreshing={!!refreshing}
+                  onRefresh={onRefresh}
+                  tintColor={refreshColor}
+                  colors={refreshColor ? [refreshColor] : undefined}
+                  progressBackgroundColor={refreshBackground}
+                />
+              ) : undefined
+            }
+          >
             <View style={styles.activityHero}>
               <View style={styles.activityHeroText}>
                 <AccessibleText style={[styles.activityTitle, { color: theme.textPrimary }]}>Activity</AccessibleText>
@@ -609,7 +636,7 @@ function ActivityTabInner({
                 )}
               </View>
             ) : null}
-          </>
+          </ScrollView>
         );
 
 }

@@ -1,5 +1,5 @@
 import { memo } from 'react';
-import { View } from 'react-native';
+import { RefreshControl, ScrollView, View, type StyleProp, type ViewStyle } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppIcon } from '../ui/AppIcon';
 import { AccessibleText } from '../ui/AccessibleText';
@@ -42,6 +42,11 @@ export type ProfileTabProps = {
   setSubscriptionSheetOpen: (open: boolean) => void;
   goToKejaRentals: () => void;
   goToActivity: () => void;
+  contentContainerStyle?: StyleProp<ViewStyle>;
+  refreshing?: boolean;
+  onRefresh?: () => void;
+  refreshColor?: string;
+  refreshBackground?: string;
 };
 
 function ProfileTabInner(props: ProfileTabProps) {
@@ -65,6 +70,11 @@ function ProfileTabInner(props: ProfileTabProps) {
     setSubscriptionSheetOpen,
     goToKejaRentals,
     goToActivity,
+    contentContainerStyle,
+    refreshing,
+    onRefresh,
+    refreshColor,
+    refreshBackground,
   } = props;
   const nestSurface = nestedChrome(themeMode === 'dark');
         const displayName = profile?.displayName ?? user?.displayName ?? 'Guest';
@@ -81,7 +91,23 @@ function ProfileTabInner(props: ProfileTabProps) {
           : '—';
         const laundryCount = profile?.stats?.laundryOrders ?? laundryOrders.length;
                 return (
-          <>
+          <ScrollView
+            style={{ flex: 1 }}
+            contentContainerStyle={contentContainerStyle}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            refreshControl={
+              onRefresh ? (
+                <RefreshControl
+                  refreshing={!!refreshing}
+                  onRefresh={onRefresh}
+                  tintColor={refreshColor}
+                  colors={refreshColor ? [refreshColor] : undefined}
+                  progressBackgroundColor={refreshBackground}
+                />
+              ) : undefined
+            }
+          >
             <PressableScale
               onPress={() => profile && setProfileEditOpen(true)}
               style={[styles.profileHero, nestSurface]}
@@ -340,7 +366,7 @@ function ProfileTabInner(props: ProfileTabProps) {
             <AccessibleText style={[styles.makeVersion, { color: theme.textMuted, marginTop: 20 }]}>
               Jua X · v1.0.0
             </AccessibleText>
-          </>
+          </ScrollView>
         );
 
 }

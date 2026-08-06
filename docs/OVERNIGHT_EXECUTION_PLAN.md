@@ -13,19 +13,19 @@
 ## Workstreams
 
 ### A — Frontend performance (lag)
-1. Extract Activity tab → memoized component (identical JSX)
-2. Extract Profile tab → memoized component
-3. FlashList (or FlatList windowing) for Activity feed + long listing rows where safe
+1. ~~Extract Activity tab → memoized component~~ done
+2. ~~Extract Profile tab → memoized component~~ done
+3. ~~Own ScrollView for Activity/Profile (no nested sheet scroll)~~ done — FlashList deferred (feeds still short; nested scroll was the bigger jank)
 4. Defer secondary loads; keep mapCoordsStable discipline
 5. `tsc --noEmit` green after each chunk
 
 ### B — Backend production surface
-1. `POST /api/v1/webhooks/mpesa` stub (signature-tolerant, idempotent apply)
-2. Payment intent store (in-memory or DB if schema allows) for STK status
-3. Honor `Idempotency-Key` on mutating routes where cheap
-4. Device-token persistence (User metadata / table if available)
+1. ~~`POST /api/v1/webhooks/mpesa` stub~~ done
+2. ~~Payment intent store~~ done (memory + AppSetting)
+3. CORS allows Idempotency-Key (full dedupe middleware still optional)
+4. ~~Device-token persistence~~ done (AppSetting)
 5. Media upload: clear contract when Dropbox unset
-6. Smoke tests for health + catalog + STK stub
+6. ~~Smoke tests~~ live Aiven: health + catalog + full `npm run smoke` + STK/status/device-token OK
 
 ### C — Client payment honesty
 1. Production builds: no fake “paid” without server `devMode` / completed status
