@@ -89,6 +89,12 @@ Scope: Fua + Keja local-first / API resilience / ship config. **No UI redesign.*
 - Sibling backend routes added: `/api/v1/health`, `/api/v1/me/device-token`, `/api/v1/media/upload`, `/api/v1/payments/mpesa/stk|status`; CORS allows `Idempotency-Key`.
 
 ### Residual notes
-- `App.tsx` still large (~16.3k) after activity helper + data-layer extraction; further screen splits kept deferred to avoid JSX/layout risk overnight.
 - Rides remain soft/coming-soon via existing segment flags.
 - EAS `projectId` placeholder must be replaced after `eas init` (listed in SHIP_CHECKLIST).
+
+## Follow-up — perf extraction + competitive assessment (2026-08-06)
+
+- Extracted `theme/appStyles.ts` (~4.6k) and `lib/maps/htmlBuilders.ts` from `App.tsx` (~16.3k → ~11.2k).
+- Stabilized map HTML memos with rounded `mapCoordsStable` to cut WebView reload jank from GPS jitter.
+- Added `docs/PRODUCTION_ASSESSMENT.md` — gap analysis vs Bolt/Airbnb-class Kenya production apps + 90-day roadmap.
+- Still TODO for lag: extract Activity/Profile/Fua/Keja sheet bodies into memoized components; FlashList; native maps long-term.
