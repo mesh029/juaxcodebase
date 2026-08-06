@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "my-expo-app",
-    "slug": "my-expo-app",
+    "name": "Jua X",
+    "slug": "jua-x",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -14,14 +14,21 @@
     },
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.juax.app",
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "TripFlow uses your location to find nearby rides and calculate routes."
+        "NSLocationWhenInUseUsageDescription": "Jua X uses your location to find nearby stays, laundry stations, and calculate ride routes.",
+        "NSCameraUsageDescription": "Jua X uses the camera for laundry proof and listing photos.",
+        "NSPhotoLibraryUsageDescription": "Jua X accesses photos for profile and listing images."
       }
     },
     "android": {
+      "package": "com.juax.app",
       "permissions": [
         "ACCESS_COARSE_LOCATION",
-        "ACCESS_FINE_LOCATION"
+        "ACCESS_FINE_LOCATION",
+        "POST_NOTIFICATIONS",
+        "CAMERA",
+        "READ_MEDIA_IMAGES"
       ],
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -45,7 +52,26 @@
           "locationWhenInUsePermission": "Jua X uses your location to find nearby stays, laundry stations, and calculate ride routes."
         }
       ],
-      "expo-secure-store"
-    ]
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "color": "#C9A227"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Jua X accesses photos for profile and listing images.",
+          "cameraPermission": "Jua X uses the camera for laundry proof and listing photos."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
+      }
+    },
+    "owner": "juax"
   }
 }
