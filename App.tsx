@@ -66,14 +66,24 @@ import {
 import { MAP_INTERACTION_HTML, MAP_INTERACTION_JS, MAP_INTERACTION_STYLES } from './mapInteractionScript';
 import { useAuth } from './context/AuthContext';
 import { useAppData } from './hooks/useAppData';
-import { createLaundryOrder, estimateLaundryOrder, fetchLaundryOrders, submitFeedback, fetchListingDetail, fetchActiveSubscription, createSubscription, confirmSubscriptionPayment, createBnbBooking, confirmBnbBookingPayment, fetchBnbBookings, createListingRequest, fetchMyListingRequests, fetchListingRequest, replyToListingRequest, getApiBaseUrl, getStoredToken } from './lib/api';
+import { estimateLaundryOrder, fetchLaundryOrders, fetchListingDetail, fetchActiveSubscription, fetchBnbBookings, fetchMyListingRequests, fetchListingRequest, getApiBaseUrl, getStoredToken } from './lib/api';
 import {
   isActiveListingRequest,
   LISTING_REQUEST_STATUS_LABELS,
   LISTING_REQUEST_STEPS,
   listingRequestStepIndex,
 } from './lib/listing-requests';
-import { PRODUCTION_TODO } from './lib/production-todos';
+import {
+  mutateBnbBooking,
+  mutateBnbPaymentConfirm,
+  mutateFeedback,
+  mutateLaundryOrder,
+  mutateListingRequest,
+  mutateListingRequestReply,
+  mutateMpesaIntent,
+  mutateSubscription,
+  mutateSubscriptionConfirm,
+} from './lib/mutations';
 import type {
   LaundryOrder,
   ListingRequest,
@@ -122,6 +132,16 @@ import {
   type CountyKey,
 } from './lib/county';
 import { ProfileEditor } from './components/profile/ProfileEditor';
+import {
+  emptyActivityViewed,
+  listingRequestActivityTitle,
+  listingRequestMessageKey,
+  mergeListingRequestWithLocalMessages,
+  mergeRequestMessages,
+  type ActivityFeedItem,
+  type ActivityViewedSnapshot,
+} from './lib/app/activity';
+import { mapboxFetchJson } from './lib/maps/mapbox-cache';
 
 type HomeSheetStage = 'collapsed' | 'mid' | 'full';
 /** When the map should dominate the screen (Uber/Bolt-style emphasis). */
@@ -167,74 +187,6 @@ const ACTIVE_BNB_BOOKING_STATUSES = new Set(['pending_payment', 'confirmed']);
 
 function findActiveBnbBookingForListing(bookings: BnbBooking[], listingId: string): BnbBooking | undefined {
   return bookings.find((b) => b.listingId === listingId && ACTIVE_BNB_BOOKING_STATUSES.has(b.status));
-}
-
-function mergeRequestMessages(
-  existing: ListingRequestMessage[] | undefined,
-  incoming: ListingRequestMessage[] | undefined,
-): ListingRequestMessage[] {
-  const rows = [...(existing ?? []), ...(incoming ?? [])];
-  const seen = new Set<string>();
-  return rows
-    .filter((row) => {
-      if (!row?.id || seen.has(row.id)) return false;
-      seen.add(row.id);
-      return true;
-    })
-    .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
-}
-
-function mergeListingRequestWithLocalMessages(
-  previous: ListingRequest | null | undefined,
-  incoming: ListingRequest,
-): ListingRequest {
-  if (!previous) return incoming;
-  return {
-    ...previous,
-    ...incoming,
-    messages: mergeRequestMessages(previous.messages, incoming.messages),
-  };
-}
-
-type ActivityFeedKind = 'chat' | 'status';
-type ActivityFeedEntity = 'listing_request' | 'laundry' | 'stay';
-
-type ActivityFeedItem = {
-  id: string;
-  kind: ActivityFeedKind;
-  entity: ActivityFeedEntity;
-  entityId: string;
-  title: string;
-  body: string;
-  timeLabel: string;
-  sortMs: number;
-};
-
-type ActivityViewedSnapshot = {
-  requestMessages: Map<string, string>;
-  requestStatus: Map<string, string>;
-  laundryStatus: Map<string, string>;
-  stayStatus: Map<string, string>;
-};
-
-function emptyActivityViewed(): ActivityViewedSnapshot {
-  return {
-    requestMessages: new Map(),
-    requestStatus: new Map(),
-    laundryStatus: new Map(),
-    stayStatus: new Map(),
-  };
-}
-
-function listingRequestMessageKey(req: ListingRequest): string {
-  const latest = req.messages?.[req.messages.length - 1];
-  return latest ? `${latest.senderRole}:${latest.createdAt}` : '';
-}
-
-function listingRequestActivityTitle(req: ListingRequest): string {
-  if (req.kind === 'tour') return `BnB tour · ${req.listingTitle}`;
-  if (req.kind === 'viewing') return `House viewing · ${req.listingTitle}`;
-  return `Stay · ${req.listingTitle}`;
 }
 
 const LISTING_STUB_IMAGE = {
@@ -1189,33 +1141,6 @@ const DESTINATIONS: Destination[] = [
     image: IMG.ridge,
     exploreReason: 'High-altitude viewpoints over Gusii highlands and scenic ridge walks.',
     exploreTip: 'Morning visits give the clearest valley views.',
-  },
-  {
-    id: 'paris',
-    name: 'Paris',
-    subtitle: 'Charles de Gaulle Airport',
-    coords: { latitude: 48.8566, longitude: 2.3522 },
-    image: IMG.paris,
-    exploreReason: 'Art, cafés, and iconic boulevards — a classic city break.',
-    exploreTip: 'Pair museums with evening walks along the Seine.',
-  },
-  {
-    id: 'dubai',
-    name: 'Dubai',
-    subtitle: 'Downtown / Burj Area',
-    coords: { latitude: 25.2048, longitude: 55.2708 },
-    image: IMG.dubai,
-    exploreReason: 'Desert modernity: skyline views, malls, and beach clubs.',
-    exploreTip: 'Mix a desert safari with waterfront dining.',
-  },
-  {
-    id: 'accra',
-    name: 'Accra',
-    subtitle: 'Kotoka International',
-    coords: { latitude: 5.6037, longitude: -0.187 },
-    image: IMG.accra,
-    exploreReason: 'West African energy — markets, music, and Atlantic beaches.',
-    exploreTip: 'Try Jamestown walks and fresh grilled tilapia by the coast.',
   },
 ];
 
@@ -3431,9 +3356,10 @@ export default function App() {
       },
     }));
   }, [exploreJournalArticles, exploreJournalDisplayed, exploreLens]);
+  // Kenya MVP soft estimate (KES) — server will own pricing when rides go live.
   const estimatedFare =
     routeDistanceKm !== null
-      ? Math.max(8, Math.round((3.2 + routeDistanceKm * 1.1) * selectedRide.multiplier))
+      ? Math.max(150, Math.round((80 + routeDistanceKm * 45) * selectedRide.multiplier))
       : null;
   const laundryMapHighlight = useMemo(() => {
     if (!laundryStationId) return null;
@@ -4179,9 +4105,7 @@ export default function App() {
       if (!MAPBOX_ACCESS_TOKEN) return;
       try {
         const geocodeUrl = `https://api.mapbox.com/geocoding/v5/mapbox.places/${coords.longitude},${coords.latitude}.json?types=address,locality,place,district,region&limit=5&access_token=${MAPBOX_ACCESS_TOKEN}`;
-        const geocodeResponse = await fetch(geocodeUrl);
-        if (!geocodeResponse.ok) return;
-        const geocodeData = await geocodeResponse.json();
+        const geocodeData = await mapboxFetchJson<{ features?: any[] }>(geocodeUrl);
         const feature = geocodeData?.features?.[0];
         const placeName = feature?.place_name;
         const textCandidates: string[] = [];
@@ -4277,8 +4201,7 @@ export default function App() {
     setRouteLoading(true);
     try {
       const directionsUrl = `https://api.mapbox.com/directions/v5/mapbox/driving/${currentCoords.longitude},${currentCoords.latitude};${selectedDestination.coords.longitude},${selectedDestination.coords.latitude}?overview=full&geometries=geojson&alternatives=true&access_token=${MAPBOX_ACCESS_TOKEN}`;
-      const response = await fetch(directionsUrl);
-      const data = await response.json();
+      const data = await mapboxFetchJson<{ routes?: any[] }>(directionsUrl);
       const routes = data?.routes;
       if (!routes?.length) {
         setRouteDistanceKm(null);
@@ -4286,12 +4209,15 @@ export default function App() {
         setRouteCoordinates([]);
         return;
       }
-      const bestRoute = routes.reduce((best: any, candidate: any) =>
+      const bestRoute: any = routes.reduce((best: any, candidate: any) =>
         candidate.duration < best.duration ? candidate : best,
       );
-      setRouteDistanceKm(Number((bestRoute.distance / 1000).toFixed(1)));
-      setRouteDurationMin(Math.max(1, Math.round(bestRoute.duration / 60)));
-      setRouteCoordinates(bestRoute.geometry?.coordinates || []);
+      const distanceM = Number(bestRoute?.distance ?? 0);
+      const durationS = Number(bestRoute?.duration ?? 0);
+      setRouteDistanceKm(Number((distanceM / 1000).toFixed(1)));
+      setRouteDurationMin(Math.max(1, Math.round(durationS / 60)));
+      const coords = bestRoute?.geometry?.coordinates;
+      setRouteCoordinates(Array.isArray(coords) ? coords : []);
     } catch {
       setRouteDistanceKm(null);
       setRouteDurationMin(null);
@@ -4320,8 +4246,7 @@ export default function App() {
       const focusKenya = /kenya|nairobi|mombasa|kisumu|nakuru|eldoret/i.test(query);
       const countryFilter = focusKenya ? '&country=ke' : '';
       const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(query)}.json?autocomplete=true&limit=1${proximity}${countryFilter}&access_token=${MAPBOX_ACCESS_TOKEN}`;
-      const response = await fetch(url);
-      const data = await response.json();
+      const data = await mapboxFetchJson<{ features?: Array<{ id?: string; place_name?: string; text?: string; center?: number[] }> }>(url);
       const feature = data?.features?.[0];
       if (!feature?.center) {
         setLocationError('No destination found. Try another search term.');
@@ -4367,8 +4292,7 @@ export default function App() {
       const focusKenya = /kenya|nairobi|mombasa|kisumu|nakuru|eldoret|westlands/i.test(trimmed);
       const countryFilter = focusKenya ? '&country=ke' : '';
       const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(trimmed)}.json?autocomplete=true&limit=5${proximity}${countryFilter}&access_token=${MAPBOX_ACCESS_TOKEN}`;
-      const response = await fetch(url);
-      const data = await response.json();
+      const data = await mapboxFetchJson<{ features?: Array<{ id?: string; place_name?: string; text?: string; center?: number[] }> }>(url);
       const suggestions: Suggestion[] = (data?.features || [])
         .filter((feature: any) => Array.isArray(feature?.center) && feature.center.length === 2)
         .map((feature: any, index: number) => ({
@@ -4655,11 +4579,14 @@ export default function App() {
 
   const reloadLaundryOrders = useCallback(async () => {
     if (!isAuthed) return;
+    const { cacheLaundryOrders, loadCachedLaundryOrders } = await import('./lib/offline/cache');
     try {
       const orders = await fetchLaundryOrders();
       setLaundryOrders(orders);
+      await cacheLaundryOrders(orders);
     } catch {
-      /* keep existing */
+      const cached = await loadCachedLaundryOrders();
+      if (cached.length) setLaundryOrders(cached);
     }
   }, [isAuthed]);
 
@@ -4684,11 +4611,14 @@ export default function App() {
 
   const reloadBnbBookings = useCallback(async () => {
     if (!isAuthed) return;
+    const { cacheBnbBookings, loadCachedBnbBookings } = await import('./lib/offline/cache');
     try {
       const bookings = await fetchBnbBookings();
       setBnbBookings(bookings);
+      await cacheBnbBookings(bookings);
     } catch {
-      /* keep existing */
+      const cached = await loadCachedBnbBookings();
+      if (cached.length) setBnbBookings(cached);
     }
   }, [isAuthed]);
 
@@ -5105,12 +5035,13 @@ export default function App() {
         kind === 'tour' ? '3D tour request' : kind === 'viewing' ? 'Viewing request' : 'Stay reservation';
       const trimmedNote = opts?.userNote?.trim();
       try {
-        const { request } = await createListingRequest({
+        const mut = await mutateListingRequest({
           listingId,
           kind,
           pickupMode: kind === 'viewing' ? opts?.pickupMode : undefined,
           userNote: trimmedNote || undefined,
         });
+        const request = mut.result?.request;
         const optimisticUserMessage: ListingRequestMessage | null = trimmedNote
           ? {
               id: `local-note-${Date.now()}`,
@@ -5119,23 +5050,52 @@ export default function App() {
               createdAt: new Date().toISOString(),
             }
           : null;
-        setListingRequests((prev) => {
-          const existing = prev.find((r) => r.id === request.id);
-          const incoming: ListingRequest = {
-            ...request,
-            statusLabel: request.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[request.status] ?? 'Requested',
-            messages: mergeRequestMessages(
-              request.messages,
-              optimisticUserMessage ? [optimisticUserMessage] : [],
-            ),
-          };
-          if (existing) {
-            return prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, incoming) : r));
-          }
-          return [incoming, ...prev];
-        });
+        if (request) {
+          setListingRequests((prev) => {
+            const existing = prev.find((r) => r.id === request.id);
+            const incoming: ListingRequest = {
+              ...request,
+              statusLabel: request.statusLabel ?? LISTING_REQUEST_STATUS_LABELS[request.status] ?? 'Requested',
+              messages: mergeRequestMessages(
+                request.messages,
+                optimisticUserMessage ? [optimisticUserMessage] : [],
+              ),
+            };
+            if (existing) {
+              return prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, incoming) : r));
+            }
+            return [incoming, ...prev];
+          });
+        } else if (mut.queued) {
+          const localId = mut.outboxId ?? `local-req-${Date.now()}`;
+          setListingRequests((prev) => [
+            {
+              id: localId,
+              listingId,
+              listingTitle,
+              kind,
+              service,
+              status: 'requested',
+              statusLabel: 'Queued offline',
+              pickupMode: opts?.pickupMode ?? null,
+              pickupModeLabel: opts?.pickupMode
+                ? opts.pickupMode === 'taxi'
+                  ? 'Car / taxi pickup'
+                  : 'Motorbike rider'
+                : null,
+              createdAt: new Date().toISOString(),
+              messages: optimisticUserMessage ? [optimisticUserMessage] : [],
+            },
+            ...prev,
+          ]);
+        }
         setViewingRequestTarget(null);
-        flashBookingNotice(`${title} submitted — track updates in Activity`, { goTrips: true });
+        flashBookingNotice(
+          mut.queued
+            ? `${title} saved offline — will sync when online`
+            : `${title} submitted — track updates in Activity`,
+          { goTrips: true },
+        );
         setPhaseForService('bnbs', 'confirmed');
         if (opts?.closeDeepPage) {
           setHomeDeepPage(null);
@@ -5149,47 +5109,53 @@ export default function App() {
               : '';
           const noteLine = trimmedNote ? ` Note: ${trimmedNote}` : '';
           const body = `I would like to request a ${kind} for "${listingTitle}".${pickupLine}${noteLine} Please follow up via the app.`;
-          const { feedback } = await submitFeedback({
+          const fb = await mutateFeedback({
             service,
             category: 'suggestion',
             title,
             body,
             listingId,
           });
-          setListingRequests((prev) => {
-            if (prev.some((r) => r.id === feedback.id)) return prev;
-            return [
-              {
-                id: feedback.id,
-                listingId,
-                listingTitle,
-                kind,
-                service,
-                status: feedback.status === 'new' ? 'requested' : feedback.status,
-                statusLabel: LISTING_REQUEST_STATUS_LABELS.requested,
-                pickupMode: opts?.pickupMode ?? null,
-                pickupModeLabel: opts?.pickupMode
-                  ? opts.pickupMode === 'taxi'
-                    ? 'Car / taxi pickup'
-                    : 'Motorbike rider'
-                  : null,
-                createdAt: feedback.createdAt,
-                messages: trimmedNote
-                  ? [
-                      {
-                        id: `local-note-${Date.now()}`,
-                        senderRole: 'user',
-                        body: trimmedNote,
-                        createdAt: new Date().toISOString(),
-                      },
-                    ]
-                  : [],
-              },
-              ...prev,
-            ];
-          });
+          const feedback = fb.result?.feedback;
+          if (feedback) {
+            setListingRequests((prev) => {
+              if (prev.some((r) => r.id === feedback.id)) return prev;
+              return [
+                {
+                  id: feedback.id,
+                  listingId,
+                  listingTitle,
+                  kind,
+                  service,
+                  status: feedback.status === 'new' ? 'requested' : feedback.status,
+                  statusLabel: LISTING_REQUEST_STATUS_LABELS.requested,
+                  pickupMode: opts?.pickupMode ?? null,
+                  pickupModeLabel: opts?.pickupMode
+                    ? opts.pickupMode === 'taxi'
+                      ? 'Car / taxi pickup'
+                      : 'Motorbike rider'
+                    : null,
+                  createdAt: feedback.createdAt,
+                  messages: trimmedNote
+                    ? [
+                        {
+                          id: `local-note-${Date.now()}`,
+                          senderRole: 'user',
+                          body: trimmedNote,
+                          createdAt: new Date().toISOString(),
+                        },
+                      ]
+                    : [],
+                },
+                ...prev,
+              ];
+            });
+          }
           setViewingRequestTarget(null);
-          flashBookingNotice(`${title} submitted — check Activity`, { goTrips: true });
+          flashBookingNotice(
+            fb.queued ? `${title} saved offline — will sync` : `${title} submitted — check Activity`,
+            { goTrips: true },
+          );
           setPhaseForService('bnbs', 'confirmed');
           if (opts?.closeDeepPage) {
             setHomeDeepPage(null);
@@ -5235,14 +5201,17 @@ export default function App() {
       }
       setRequestSubmitting(true);
       try {
-        await submitFeedback({
+        const fb = await mutateFeedback({
           service: catalog === 'bnb' ? 'bnb' : 'rental',
           category: 'suggestion',
           title: 'Ride to listing',
           body: `Please arrange a Jua ride to "${listingTitle}" for my viewing/stay.`,
           listingId,
         });
-        flashBookingNotice('Ride request submitted — check Activity', { goTrips: true });
+        flashBookingNotice(
+          fb.queued ? 'Ride request saved offline — will sync' : 'Ride request submitted — check Activity',
+          { goTrips: true },
+        );
       } catch (err) {
         setBookingMessage(err instanceof Error ? err.message : 'Could not request ride');
       } finally {
@@ -5337,11 +5306,16 @@ export default function App() {
       if (!listingRequestSheetId) return;
       setListingRequestReplySubmitting(true);
       try {
-        const { request } = await replyToListingRequest(listingRequestSheetId, body);
-        setListingRequestDetail((prev) => mergeListingRequestWithLocalMessages(prev, request));
-        setListingRequests((prev) =>
-          prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, request) : r)),
-        );
+        const mut = await mutateListingRequestReply(listingRequestSheetId, body);
+        if (mut.result?.request) {
+          const request = mut.result.request;
+          setListingRequestDetail((prev) => mergeListingRequestWithLocalMessages(prev, request));
+          setListingRequests((prev) =>
+            prev.map((r) => (r.id === request.id ? mergeListingRequestWithLocalMessages(r, request) : r)),
+          );
+        } else if (mut.queued) {
+          flashBookingNotice('Reply saved offline — will sync when online');
+        }
       } catch (err) {
         setBookingMessage(err instanceof Error ? err.message : 'Could not send reply');
         throw err;
@@ -5349,7 +5323,7 @@ export default function App() {
         setListingRequestReplySubmitting(false);
       }
     },
-    [listingRequestSheetId],
+    [listingRequestSheetId, flashBookingNotice],
   );
 
   const startTripToBookedStay = useCallback(() => {
@@ -5393,15 +5367,38 @@ export default function App() {
     }
     setRequestSubmitting(true);
     try {
-      const { subscription } = await createSubscription(plan.plan);
-      // PRODUCTION_TODO: real M-Pesa STK — lib/production-todos.ts MPESA_SUBSCRIPTION
-      const dummyReceipt = `DUMMY-MPESA-${Date.now()}`;
-      const { subscription: paid } = await confirmSubscriptionPayment(subscription.id, dummyReceipt);
-      setRentalSubscriptionActive(paid.active);
+      const created = await mutateSubscription(plan.plan);
+      if (created.queued || !created.result?.subscription) {
+        await mutateMpesaIntent({
+          purpose: 'subscription',
+          amountKes: plan.priceKes,
+          referenceId: plan.plan,
+        });
+        setSubscriptionSheetOpen(false);
+        flashBookingNotice('Subscription queued — will activate when online');
+        return;
+      }
+      const subscription = created.result.subscription;
+      const stk = await mutateMpesaIntent({
+        purpose: 'subscription',
+        amountKes: plan.priceKes,
+        referenceId: subscription.id,
+      });
+      // Confirm only after STK intent accepted, or __DEV__ payment-dev path on server.
+      const confirm = await mutateSubscriptionConfirm(
+        subscription.id,
+        stk.result?.devMode || __DEV__ ? undefined : stk.result?.checkoutRequestId,
+      );
+      const paid = confirm.result?.subscription ?? subscription;
+      setRentalSubscriptionActive(paid.active ?? true);
       setActiveSubscriptionPlan(paid.plan);
       setActiveSubscriptionExpiresAt(paid.expiresAt ?? null);
       setSubscriptionSheetOpen(false);
-      flashBookingNotice('Subscription active — rental locations unlocked');
+      flashBookingNotice(
+        confirm.queued
+          ? 'Payment queued — subscription will unlock when synced'
+          : 'Subscription active — rental locations unlocked',
+      );
       if (listingDetail?.kind === 'house') {
         const detail = await fetchListingDetail(listingDetail.id);
         setListingDetailLive(detail);
@@ -5427,24 +5424,44 @@ export default function App() {
       checkOut.setDate(checkOut.getDate() + 2);
       setRequestSubmitting(true);
       try {
-        const { booking } = await createBnbBooking({
+        const created = await mutateBnbBooking({
           listingId,
           checkIn: checkIn.toISOString().slice(0, 10),
           checkOut: checkOut.toISOString().slice(0, 10),
           guests: 2,
         });
-        const dummyReceipt = `DUMMY-MPESA-${Date.now()}`;
-        const { booking: confirmed } = await confirmBnbBookingPayment(booking.id, dummyReceipt);
+        if (created.queued || !created.result?.booking) {
+          setBnbBookingSheetOpen(false);
+          setBnbBookingTarget(null);
+          flashBookingNotice('Stay reservation saved offline — will sync when online', {
+            goTrips: !opts?.stayOnListing,
+          });
+          return;
+        }
+        const booking = created.result.booking;
+        await mutateMpesaIntent({
+          purpose: 'bnb_booking',
+          amountKes: booking.totalKes,
+          referenceId: booking.id,
+        });
+        const paid = await mutateBnbPaymentConfirm(booking.id);
+        const confirmed = paid.result?.booking ?? booking;
         setBnbBookings((prev) => [confirmed, ...prev.filter((b) => b.id !== confirmed.id)]);
         setBnbBookingSheetOpen(false);
         setBnbBookingTarget(null);
-        const detail = await fetchListingDetail(listingId);
-        setListingDetailLive(detail);
-        setBookedListingSnapshots((prev) => ({ ...prev, [listingId]: adaptBnbListing(detail) }));
+        try {
+          const detail = await fetchListingDetail(listingId);
+          setListingDetailLive(detail);
+          setBookedListingSnapshots((prev) => ({ ...prev, [listingId]: adaptBnbListing(detail) }));
+        } catch {
+          /* offline unlock may lag until sync */
+        }
         flashBookingNotice(
-          opts?.stayOnListing
-            ? 'Stay booked — exact address unlocked below'
-            : `Stay booked — ${listingTitle}`,
+          paid.queued
+            ? 'Stay reserved — payment will sync when online'
+            : opts?.stayOnListing
+              ? 'Stay booked — exact address unlocked below'
+              : `Stay booked — ${listingTitle}`,
           { goTrips: !opts?.stayOnListing },
         );
         await refreshProfile();
@@ -5479,7 +5496,7 @@ export default function App() {
         loadKg: selectedMamaFuaTasks.includes('laundry') ? laundryQuantity : 0,
       };
     }
-    if (laundryPickupMode !== 'mamafua' && laundryStationId) {
+    if (laundryPickupMode === 'station' && laundryStationId) {
       return {
         ...base,
         pickupMode: 'station',
@@ -7710,7 +7727,7 @@ export default function App() {
         );
       }
 
-      switch (activeSegment) {
+      switch (activeSegment as ServiceSegmentId) {
         case 'rides': {
           const hubMode = ridePickupMode === 'station';
           const visibleRideHubs = nearbyStations.slice(0, 4);
@@ -9108,17 +9125,24 @@ export default function App() {
           }
           setOrderSubmitting(true);
           try {
-            const order = await createLaundryOrder(buildLaundryOrderBody());
+            const body = buildLaundryOrderBody();
+            const mut = await mutateLaundryOrder(body);
+            const order = mut.result;
             const where =
               laundryPickupMode === 'mamafua'
                 ? 'Mama Fua visit'
                 : laundryStationId
                   ? pickupStations.find((s) => s.id === laundryStationId)?.name ?? 'Station'
                   : 'Your location';
-            const request = `Jua Fua · ${order.pickupLabel || where} · ${order.loadLabel} · KES ${order.totalKes}`;
-            setTripFeed((prev) => [request, ...prev].slice(0, 10));
-            const shortMsg =
-              order.serviceType === 'mamafua'
+            if (order) {
+              const request = `Jua Fua · ${order.pickupLabel || where} · ${order.loadLabel} · KES ${order.totalKes}`;
+              setTripFeed((prev) => [request, ...prev].slice(0, 10));
+            } else {
+              setTripFeed((prev) => [`Jua Fua · ${where} · queued offline`, ...prev].slice(0, 10));
+            }
+            const shortMsg = mut.queued
+              ? 'Fua request saved offline — will sync when online'
+              : order?.serviceType === 'mamafua'
                 ? 'Mama Fua visit submitted — check Activity'
                 : 'Fua request submitted — check Activity';
             flashBookingNotice(shortMsg, { goTrips: true });

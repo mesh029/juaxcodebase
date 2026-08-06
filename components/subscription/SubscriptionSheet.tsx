@@ -8,8 +8,6 @@ import {
   View,
 } from 'react-native';
 import type { SubscriptionPlan } from '../../lib/api-types';
-import { PRODUCTION_TODO } from '../../lib/production-todos';
-
 type Theme = {
   sheet: string;
   border: string;
@@ -145,7 +143,7 @@ export function SubscriptionSheet({
           </Pressable>
 
           <Text style={[styles.todoNote, { color: theme.textSecondary }]}>
-            Pilot: dummy payment. {PRODUCTION_TODO.MPESA_STK.split(': ')[1]}
+            M-Pesa STK via secure server when configured.
           </Text>
 
           <Pressable onPress={onClose} style={styles.cancelBtn} disabled={busy}>
